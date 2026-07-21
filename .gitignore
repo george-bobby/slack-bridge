@@ -1,0 +1,37 @@
+# ─── Secrets and machine-specific configuration ──────────────────────────────
+# Every Slack member id, Linear slug and absolute path lives here. .env.example
+# is the committed documentation for it.
+.env
+.env.local
+.env.*.local
+
+# ─── Generated prompts ───────────────────────────────────────────────────────
+# scripts/install.sh renders templates/ into .claude/ with this machine's .env
+# baked in, then symlinks the result into ~/.claude. The templates are source;
+# these are build output.
+.claude/commands/
+.claude/skills/
+
+# ─── Runtime state ───────────────────────────────────────────────────────────
+# Everything the dashboard and the poller write: config.json, state.json,
+# activity.json, cost.json, runs/ (chat transcripts, which contain Slack
+# message text) and the single-flight lock. One rule, one directory — the
+# committed example is the sole exception.
+data/*
+!data/config.example.json
+
+# ─── Logs ────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ─── Node ────────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+package-lock.json
+
+# ─── Editors and OS ──────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

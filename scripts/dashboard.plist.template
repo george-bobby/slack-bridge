@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template. `./scripts/install.sh cron` substitutes the __TOKENS__ from .env and
+  installs the result into ~/Library/LaunchAgents/. Don't load this file directly.
+
+  The companion to launchd.plist.template: that one runs the poller on an
+  interval, this one keeps the dashboard server alive. Separate labels on
+  purpose — the dashboard checks `launchctl print <poller label>` to draw its
+  own "cron installed" chip, so the poller's label must keep meaning exactly
+  one job. Killing this job never stops mentions being processed.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__.dashboard</string>
+
+  <!-- Absolute node path, resolved at install time: launchd starts jobs with a
+       near-empty PATH, so a bare `node` would never be found. Re-run
+       `./scripts/install.sh cron` after switching node versions. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__PROJ__/index.js</string>
+  </array>
+
+  <!-- A server, not a tick: start at load and restart it if it ever exits.
+       launchd throttles respawns to one per 10s, so a genuinely broken
+       dashboard idles in a slow retry instead of spinning. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJ__</string>
+
+  <!-- index.js reads .env itself; this is here so the port is visible in
+       `launchctl print` and stays pinned to whatever install.sh saw. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SLACK_BRIDGE_PORT</key>
+    <string>__PORT__</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__PROJ__/logs/dashboard.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJ__/logs/dashboard.err.log</string>
+</dict>
+</plist>

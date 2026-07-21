@@ -1,0 +1,20 @@
+{
+  "name": "slack-bridge",
+  "version": "2.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Zero-dependency local control panel for the Slack -> Claude Code fetch pipeline. Mention detection, context, replies and Linear all run through the claude.ai Slack/Linear MCP connectors (via the /scan-mentions poller) - this server only owns the toggle dashboard and shared state.",
+  "keywords": ["slack", "claude-code", "linear", "automation", "dashboard"],
+  "main": "index.js",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "dashboard": "node index.js",
+    "render": "node lib/render.js",
+    "install-agent": "./scripts/install.sh",
+    "tick": "./scripts/run-once.sh"
+  }
+}

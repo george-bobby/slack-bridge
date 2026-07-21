@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Template. `./scripts/install.sh cron` substitutes the __TOKENS__ from .env +
+  data/config.json and installs the result into ~/Library/LaunchAgents/.
+  Don't load this file directly.
+
+  A LaunchAgent (not a Daemon) on purpose: it runs inside your logged-in Aqua
+  session, so the login keychain is unlocked and the claude.ai connector
+  tokens are readable. As a Daemon the Slack/Linear MCPs would fail to auth.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__PROJ__/scripts/run-once.sh</string>
+  </array>
+
+  <!-- Every tick costs a full session even when it finds nothing, so cadence
+       is the single biggest cost lever. 300s = 5 min of worst-case latency
+       for ~1/5 the spend of 60s. `./scripts/install.sh cron` stamps this from
+       data/config.json's poller.intervalSec, which the dashboard writes. -->
+  <key>StartInterval</key>
+  <integer>__INTERVAL__</integer>
+
+  <!-- run-once.sh single-flights itself, so a long pipeline run just makes
+       the next few ticks no-op instead of piling up. -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJ__</string>
+
+  <!-- These are FALLBACKS only, stamped from .env at install time. config.json
+       is authoritative for all four — run-once.sh reads it at the top of every
+       tick, so the dashboard's Schedule panel changes real behaviour without
+       touching this file. They remain here so the poller still has sane values
+       if data/config.json is missing or unreadable. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>SLACK_BRIDGE_INTERVAL</key>
+    <string>__INTERVAL__</string>
+    <!-- Local 24h window. Mentions that land outside it are picked up by the
+         first tick after it opens — the watermark means nothing is missed,
+         only delayed. Empty disables the window. -->
+    <key>SLACK_BRIDGE_ACTIVE_HOURS</key>
+    <string>__ACTIVE_HOURS__</string>
+    <!-- 1=Mon .. 7=Sun. -->
+    <key>SLACK_BRIDGE_ACTIVE_DAYS</key>
+    <string>__ACTIVE_DAYS__</string>
+    <!-- Triage model. The dispatched pipeline is escalated separately. -->
+    <key>SLACK_BRIDGE_SCAN_MODEL</key>
+    <string>__SCAN_MODEL__</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__PROJ__/logs/cron.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PROJ__/logs/cron.err.log</string>
+</dict>
+</plist>

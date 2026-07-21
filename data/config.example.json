@@ -1,0 +1,32 @@
+{
+  "_comment": "Runtime state, written by the dashboard and read by the poller at the top of every tick. config.json is gitignored — this file documents its shape. You do not need to create it: it is written the first time you change something in the dashboard, and everything below falls back to the POLL_* values in .env until then.",
+
+  "mode": "auto",
+  "_mode": "off = poll nothing, spend nothing. watch = poll and list every mention in the inbox, dispatch nothing (you press Start). auto = poll, triage, dispatch the oldest actionable one.",
+
+  "enabled": true,
+  "_enabled": "Derived from mode (mode !== 'off'). Kept in lockstep because run-once.sh's cheapest gate is a grep for it.",
+
+  "createLinearIssue": false,
+  "codexReplies": true,
+  "saveToMemory": true,
+  "reply": true,
+  "_toggles": "Passed through to the pipeline. createLinearIssue: post the one-line @Linear command in the thread and build from the returned issue. codexReplies: after the PR opens, request a Codex review, poll until it lands, run /resolve. saveToMemory: let the run bank lessons via /addmem. reply: post the verdict back in the Slack thread.",
+
+  "poller": {
+    "intervalSec": 300,
+    "activeHours": "08-20",
+    "activeDays": "12345",
+    "scanModel": "haiku"
+  },
+  "_poller": "Cadence, the local 24h window ('' disables it), the days to poll on (1=Mon..7=Sun), and the triage model. Changing intervalSec also needs the launchd job reloaded — launchd owns StartInterval, and the Schedule panel's button re-stamps the plist.",
+
+  "followup": {
+    "model": "opus",
+    "workdir": "",
+    "permissionMode": "bypassPermissions",
+    "effort": "",
+    "context1m": false
+  },
+  "_followup": "The defaults a new chat's job options start from. A chat overrides any of them from its composer, and its picks live on the run rather than here. An empty workdir falls back to TARGET_REPO in .env."
+}
