@@ -12,7 +12,6 @@
   },
   "scripts": {
     "start": "node index.js",
-    "dashboard": "node index.js",
     "render": "node lib/render.js",
     "install-agent": "./scripts/install.sh",
     "tick": "./scripts/run-once.sh"

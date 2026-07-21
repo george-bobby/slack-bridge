@@ -1,6 +1,6 @@
 ---
 name: scan-mentions
-description: One poll of Slack for new @mentions of {{SLACK_USER_NAME}}, via the claude.ai Slack MCP. Triage each new mention; dispatch the slack-fetch-pipeline on the oldest actionable one; advance the watermark; log activity. Runs headlessly under launchd via `run-once.sh` (`claude -p /scan-mentions`); cheap and side-effect-free when there's nothing to do.
+description: One tick of the mention poller. Detection already happened for free in scripts/probe.js — this triages what it found, dispatches the slack-fetch-pipeline on the oldest actionable one, advances the watermark and logs activity. Runs headlessly under launchd via `run-once.sh` (`claude -p /scan-mentions`), and only starts at all when there is a real mention to work.
 ---
 
 # scan-mentions
@@ -20,7 +20,7 @@ The watched Slack user is **{{SLACK_USER_NAME}}**, member id **`{{SLACK_USER_ID}
 
 ## 0. Stamp the run (do this first — the heartbeat needs it)
 ```bash
-echo "now=$(date +%s) runner=${SLACK_BRIDGE_RUNNER:-manual} interval=${SLACK_BRIDGE_INTERVAL:-60} mode=${SLACK_BRIDGE_MODE:-auto}"
+echo "now=$(date +%s) runner=${SLACK_BRIDGE_RUNNER:-manual} interval=${SLACK_BRIDGE_INTERVAL:-60} mode=${SLACK_BRIDGE_MODE:-auto} prefetch=${SLACK_BRIDGE_PREFETCH:-none}"
 ```
 
 `run-once.sh` is the only thing that sets `SLACK_BRIDGE_RUNNER` — to `cron`
@@ -50,52 +50,39 @@ Read CONFIG and STATE.
   the heartbeat (step 7) with status `"paused"` and **stop**. Do nothing else.
 - `state.lastTs` is the watermark (a Slack `ts` string, or `"0"` if never run).
 
-## 2. First-run guard (don't replay history)
-If `state.lastTs === "0"`: get the current epoch (`date +%s`), set
-`state.lastTs` to `"<epoch>.000000"`, write STATE, update the heartbeat with
-status `"initialized — watching from now"`, and **stop**. Never process the
-backlog of old mentions.
+## 2. Fetch the new mentions
 
-## 3. Fetch new mentions
+`scripts/probe.js` has **already done this**, over plain HTTP, for $0 — it is
+why you are running at all. It also owns the watermark: a first-ever tick sets
+`state.lastTs` to *now* and stops there, so old mentions are never replayed.
+You never search Slack yourself.
 
-**First load the tool's schema.** MCP tools are *deferred*: at session start
-only their names exist, listed in a `<system-reminder>`, with no parameter
-schema attached. A deferred tool is not callable — invoking it straight off
-fails with `InputValidationError`. This is normal and says nothing about
-whether the connector is up. Run:
+Read what it found:
 
-```
-ToolSearch(query: "select:mcp__claude_ai_Slack__slack_search_public_and_private", max_results: 5)
+```bash
+cat "$SLACK_BRIDGE_PREFETCH"
 ```
 
-and wait for the `<functions>` block to come back. Only after its schema
-appears is the tool callable. Do the same one-line `select:` fetch for any
-other Slack or Linear tool this run needs.
+The `mentions` array is already filtered — cut at the watermark, de-duplicated
+against `state.processed`, {{SLACK_USER_NAME}}'s own messages and Slackbot
+removed — and sorted oldest-first. Every object carries exactly the fields §3
+wants (`runId`, `ts`, `who`, `userId`, `channel`, `channelId`, `threadTs`,
+`text`, `permalink`).
 
-Then call `mcp__claude_ai_Slack__slack_search_public_and_private`:
-- `query`: `<@{{SLACK_USER_ID}}>`
-- `sort`: `timestamp`, `sort_dir`: `asc`  (oldest first)
-- `after`: the integer part of `state.lastTs`
-- `limit`: 20, `include_context`: false
+**Take it as-is.** Do not call the Slack MCP search to check it or to fetch
+more — that call is the single most expensive thing in a quiet tick and would
+return exactly what you are already holding.
 
-Report `"mcp unavailable"` **only** if ToolSearch itself comes back without
-that tool, or the call errors once its schema is loaded. "It wasn't in my
-function list" is not that — it is the deferred state above, and the fix is to
-run ToolSearch, not to give up. A headless `cron` tick is no different here:
-the connectors load under launchd's stripped environment (verified), so absent
-a real ToolSearch miss or call error, assume the connector is fine.
+- `PREFETCH` unset or the file missing → you were started by hand, outside
+  `run-once.sh`. Heartbeat status `"no prefetch — run scripts/run-once.sh"` and
+  **stop**. There is no fallback search path by design.
+- `mentions` empty → the probe and the watermark disagree. Don't search; go to
+  §7 with status `"idle"`.
+- `mcpOk` in §7 is about the *Slack MCP connector*, which you have not touched
+  at this point. Report `mcpOk: true` unless a later step actually fails
+  against it — a dispatched pipeline still uses it heavily.
 
-When you genuinely do bail, do not guess and do not silently report `idle`. Go
-straight to step 7 with status `"mcp unavailable"`, `mcpOk: false` and a
-one-line `mcpNote` naming which of the two failures you hit, and stop. A run
-that reaches this point with results sets `mcpOk: true` and clears `mcpNote`.
-
-Keep only results whose `ts` is strictly greater than `state.lastTs` and whose
-`ts` is not already in `state.processed`. Drop anything authored **by
-{{SLACK_USER_NAME}} themselves** (`from` = `{{SLACK_USER_ID}}`) and any Slackbot
-reminder. If nothing remains → skip to step 7 (heartbeat, status `"idle"`).
-
-## 3.5. File every survivor into the dashboard inbox
+## 3. File every survivor into the dashboard inbox
 Before triaging, post the whole set — actionable or not — in one call:
 
 ```bash
@@ -103,7 +90,15 @@ echo '{"mentions":[ … ]}' | {{PROJECT_DIR}}/scripts/inbox.sh
 ```
 
 One object per mention:
-`{"runId":"<ts>","ts":"<ts>","who":"<display name>","userId":"<U…>","channel":"#<name>","channelId":"<C…>","threadTs":"<thread_ts or ts>","text":"<message text>","permalink":"<or omit>"}`
+`{"runId":"<thread_ts>","ts":"<ts>","who":"<display name>","userId":"<U…>","channel":"#<name>","channelId":"<C…>","threadTs":"<thread_ts or ts>","text":"<message text>","permalink":"<or omit>"}`
+
+**`runId` is the thread ts, not the message ts.** One Slack thread is one chat
+in the dashboard, always. A top-level message *is* its own thread, so there the
+two are the same string; in a reply they are not, and using the message ts there
+is what used to open a fresh task for every follow-up, every colleague chiming
+in, and every bot answering in the thread. `ts` stays the message's own — the
+watermark and `state.processed` are keyed by it, and it is how a re-post of the
+same mention is recognised as a no-op rather than filed twice.
 
 **Everything goes in, including what you are about to skip.** The dashboard's
 list is "things that mentioned {{SLACK_USER_NAME}}", and your triage verdict is
@@ -111,13 +106,57 @@ a column in it — not a filter on it. A mention you skip still appears, with yo
 reason, and it can be started by hand if the verdict was wrong. That
 disagreement is the entire point; a skip you hide is a skip nobody can correct.
 
+**Read what it prints back.** The dashboard replies with one `results` entry per
+mention — `{"ts","runId","created","appended","worked","settled"}` — and step 4
+needs it:
+
+| reply | what it means |
+|---|---|
+| `created: true` | a thread nobody has filed before — a genuinely new request |
+| `appended: true`, `worked: false` | another message in a thread that is filed but has never been worked |
+| `worked: true` | **a follow-up inside a conversation a pipeline has already run against** — not a new request |
+
+`worked` means a job actually ran, not merely that the poller wrote something
+about it. A thread you triaged `actionable` and left for watch mode is **not**
+worked, and a new message in it still deserves a fresh look.
+
 Best-effort like `emit.sh`: exits 0 whether or not the dashboard is running,
-never blocks more than 3s. Never gate on it.
+never blocks more than 3s. Never gate on it — a closed dashboard prints nothing
+at all, and that is "no information", never "nothing was filed". With no reply,
+fall through to treating each mention as `created`.
 
 ## 4. Walk oldest → newest, act on the first actionable one
 Process the surviving mentions in ascending `ts` order. For each:
 
-**Triage — is this actionable {{PRODUCT_NAME}} work?**
+**First — is this a new request at all?**
+
+If §3.5 came back `worked: true`, this mention landed in a conversation a
+pipeline has already run against. It is a follow-up, and a follow-up is
+**never** a second pipeline run:
+
+- Do **not** dispatch, in any mode. The thread already has a chat, that chat
+  already has a session, and re-running the pipeline on it would redo the
+  research, re-file the ticket and open a second PR against the same request.
+- Append a `skipped` activity entry with reason
+  `"follow-up in an already-worked thread"`, set `state.lastTs = ts`, add `ts`
+  to `state.processed`, and continue to the next mention.
+- The message is already in the chat, and the dashboard has marked it unread —
+  {{SLACK_USER_NAME}} picks it up from the composer, which resumes the same
+  session instead of starting from nothing.
+
+This is the common case for the noise that used to spawn duplicates: @Linear
+answering the ticket the pipeline just filed, a bot posting a build status, a
+colleague adding "+1" or a screenshot. None of them are a new job.
+
+**The one exception**, and it is genuinely rare: the thread has moved on to a
+second, *unrelated* request — a different bug, a different feature — that the
+existing run neither covered nor could have. Only then, re-post the mention to
+INBOX with `"newRequest": true`, which mints a sibling chat (`<thread_ts>-2`)
+that you may dispatch as normal. If it is the same subject as the run already
+there — more detail, a correction, a nudge, a repro — it is **not** a new
+request. When unsure, it is not a new request.
+
+**Then triage — is this actionable {{PRODUCT_NAME}} work?**
 - ✅ Actionable: a request / bug report / question about {{PRODUCT_NAME}} or its
   code; or it links to a Linear issue in the {{LINEAR_PROJECT}} project, a
   GitHub PR, or `{{PRODUCT_URL}}`; or it reads like "can you look into / fix /
@@ -158,7 +197,7 @@ Build the argument JSON from the mention + the current toggles:
   "thread_ts": "<thread_ts if the mention is in a thread, else its own ts>",
   "user": "<author id>",
   "text": "<message text, @mention left as-is>",
-  "runId": "<the mention ts — the pipeline reports progress against it>",
+  "runId": "<the thread ts — the chat the pipeline reports progress against>",
   "toggles": {
     "createLinearIssue": <config.createLinearIssue>,
     "codexReplies": <config.codexReplies>,
@@ -169,8 +208,10 @@ Build the argument JSON from the mention + the current toggles:
 
 **Before you spawn it**, mark the run active so the dashboard shows work in
 progress (not a stalled poller) during the long Codex poll:
-- Prepend a `running` entry to ACTIVITY (cap 50), keyed by `runId` = the mention
-  `ts`: `{ "runId": "<ts>", "ts": <now>, "who": "…", "channel": "…", "text":
+- Prepend a `running` entry to ACTIVITY (cap 50), keyed by `runId` = the
+  **thread** ts — the same id you filed it under in §3.5, or the chat the
+  dashboard shows and the one you update in §6 will be two different rows:
+  `{ "runId": "<thread_ts>", "ts": <now>, "who": "…", "channel": "…", "text":
   "<~140 chars>", "action": "running", "outcome": "working…", "permalink":
   "<or empty>" }`.
 - Write STATE now with `lastRun` = current epoch, `lastRunStatus` =
@@ -205,11 +246,11 @@ JSON, treat it as `{"action":"error","outcome":"<short note>"}`.
 
 ## 6. Record the result
 - Update the `running` entry you wrote in §5 in place (match by `runId` = the
-  mention `ts`) with the subagent's outcome — the poller is ACTIVITY's only
+  **thread** ts) with the subagent's outcome — the poller is ACTIVITY's only
   writer, so a read-modify-write is safe. Final shape:
   ```json
   {
-    "runId": "<mention ts>",
+    "runId": "<thread ts>",
     "ts": "<epoch seconds when finished>",
     "who": "<author display name or id>",
     "channel": "<channel name or id>",

@@ -7,76 +7,47 @@
  * surface you type into.
  */
 
+/* Both palettes, every colour stated exactly once.
+ *
+ * light-dark() resolves against the element's *used* `color-scheme`, so the two
+ * rules underneath are the only place the choice is actually made: the OS
+ * decides by default, and an explicit data-theme — written by the toggle and
+ * persisted in localStorage — overrides it. The palette itself never repeats.
+ *
+ * `dark light` rather than `light dark`: the first entry is what a browser with
+ * no preference either way gets, and this dashboard is dark by default. */
 :root {
-  color-scheme: dark;
-  --bg: #0a0c10;
-  --surface: #101319;
-  --surface-2: #161a21;
-  --surface-3: #1c212a;
-  --line: #232935;
-  --line-soft: #1a1f28;
-  --ink: #e8ebf1;
-  --ink-2: #aab3c2;
-  --muted: #7c8798;
-  --accent: #7c74ff;
-  --accent-ink: #b3aeff;
-  --on: #34d399;
-  --warn: #fbbf24;
-  --bad: #f87171;
-  --chip: #1b2029;
+  color-scheme: dark light;
+  --bg: light-dark(#f4f5f8, #0a0c10);
+  --surface: light-dark(#ffffff, #101319);
+  --surface-2: light-dark(#fafbfc, #161a21);
+  --surface-3: light-dark(#f1f3f6, #1c212a);
+  --line: light-dark(#e2e6ec, #232935);
+  --line-soft: light-dark(#edeff3, #1a1f28);
+  --ink: light-dark(#14161a, #e8ebf1);
+  --ink-2: light-dark(#4a515e, #aab3c2);
+  --muted: light-dark(#737d8c, #7c8798);
+  --accent: light-dark(#5b52e8, #7c74ff);
+  --accent-ink: light-dark(#4a41d6, #b3aeff);
+  --on: light-dark(#0f9d58, #34d399);
+  --warn: light-dark(#b45309, #fbbf24);
+  --bad: light-dark(#dc2626, #f87171);
+  --chip: light-dark(#f1f3f6, #1b2029);
   /* Chart series — validated in both modes (see references/palette.md).
-     1 = watching (the bill for nothing happening), 2 = pipeline runs. */
-  --series-1: #3987e5;
+     1 = watching (the bill for nothing happening), 2 = pipeline runs.
+     series-2 reads correctly in both, so it has one value, not two. */
+  --series-1: light-dark(#2a78d6, #3987e5);
   --series-2: #008300;
-  --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  /* A shadow is not a colour, so it cannot be a light-dark() itself — but the
+     colour inside it can, which is the whole of what changes between modes. */
+  --shadow-color: light-dark(rgba(15, 20, 30, 0.1), rgba(0, 0, 0, 0.45));
+  --shadow: 0 8px 30px var(--shadow-color);
   --radius: 14px;
 }
 
-:root[data-theme="light"] {
-  color-scheme: light;
-  --bg: #f4f5f8;
-  --surface: #ffffff;
-  --surface-2: #fafbfc;
-  --surface-3: #f1f3f6;
-  --line: #e2e6ec;
-  --line-soft: #edeff3;
-  --ink: #14161a;
-  --ink-2: #4a515e;
-  --muted: #737d8c;
-  --accent: #5b52e8;
-  --accent-ink: #4a41d6;
-  --on: #0f9d58;
-  --warn: #b45309;
-  --bad: #dc2626;
-  --chip: #f1f3f6;
-  --series-1: #2a78d6;
-  --series-2: #008300;
-  --shadow: 0 8px 30px rgba(15, 20, 30, 0.1);
-}
-
-@media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {
-    color-scheme: light;
-    --bg: #f4f5f8;
-    --surface: #ffffff;
-    --surface-2: #fafbfc;
-    --surface-3: #f1f3f6;
-    --line: #e2e6ec;
-    --line-soft: #edeff3;
-    --ink: #14161a;
-    --ink-2: #4a515e;
-    --muted: #737d8c;
-    --accent: #5b52e8;
-    --accent-ink: #4a41d6;
-    --on: #0f9d58;
-    --warn: #b45309;
-    --bad: #dc2626;
-    --chip: #f1f3f6;
-    --series-1: #2a78d6;
-    --series-2: #008300;
-    --shadow: 0 8px 30px rgba(15, 20, 30, 0.1);
-  }
-}
+/* The toggle, in full. Everything above follows from which of these applies. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
 
 * { box-sizing: border-box; }
 
@@ -197,10 +168,8 @@ button, input, textarea, select { font: inherit; color: inherit; }
 .pill.live .dot { background: var(--on); box-shadow: 0 0 0 3px color-mix(in srgb, var(--on) 22%, transparent); }
 .pill.working .dot { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 22%, transparent); animation: pulse 1.3s ease-in-out infinite; }
 .pill.stale .dot { background: var(--bad); }
-.pill.cron { color: var(--accent-ink); background: color-mix(in srgb, var(--accent) 13%, transparent); }
-.pill.manual { color: var(--warn); background: color-mix(in srgb, var(--warn) 13%, transparent); }
 .pill.money { font-variant-numeric: tabular-nums; }
-/* the runner + cost pills are buttons — each opens the panel that owns it */
+/* the status + cost pills are buttons — each opens the panel that owns it */
 button.pill { font: inherit; font-size: 12.5px; font-weight: 570; cursor: pointer; }
 button.pill:hover { border-color: var(--line); filter: brightness(1.12); }
 
@@ -318,6 +287,19 @@ button.pill:hover { border-color: var(--line); filter: brightness(1.12); }
 .chatrow:hover .startbtn, .chatrow[aria-current="true"] .startbtn { opacity: 1; }
 .startbtn:hover { border-color: var(--accent); color: var(--accent-ink); }
 
+/* Top-right of the row, on the same line as the timestamp. It keeps its slot
+   whether or not it is showing, so revealing it on hover never nudges the
+   timestamp sideways — the same trick .startbtn plays in the row below. */
+.delbtn {
+  flex: 0 0 auto; display: grid; place-items: center; width: 20px; height: 20px; margin: -3px -3px -3px 0;
+  border: 0; background: transparent; border-radius: 6px; color: var(--muted);
+  cursor: pointer; opacity: 0; transition: opacity 0.12s, background 0.12s, color 0.12s;
+}
+.chatrow:hover .delbtn, .chatrow[aria-current="true"] .delbtn { opacity: 1; }
+.delbtn:hover { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); opacity: 1; }
+.delbtn:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
+.delbtn svg { width: 13px; height: 13px; }
+
 .badge {
   font-size: 10.5px; font-weight: 700; letter-spacing: 0.02em;
   padding: 2px 7px; border-radius: 6px; background: var(--chip); color: var(--muted);
@@ -327,14 +309,16 @@ button.pill:hover { border-color: var(--line); filter: brightness(1.12); }
 .badge.running { background: color-mix(in srgb, var(--warn) 17%, transparent); color: var(--warn); }
 .badge.pending { background: color-mix(in srgb, var(--accent) 17%, transparent); color: var(--accent-ink); }
 .badge.error { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
-.badge.skipped { background: var(--chip); color: var(--muted); }
+/* `skipped` is the base .badge — grey on grey, deliberately the quiet one. */
 
 /* ================================================================== main === */
 
 .main { grid-area: main; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
 
-.view { display: none; flex: 1 1 auto; min-height: 0; flex-direction: column; }
-.view.active { display: flex; }
+/* One view, always shown. It was a tab once — hidden by default, revealed by
+   `.active` — but nothing has toggled that class since the Activity and Spend
+   tabs became side panels. */
+.view { display: flex; flex: 1 1 auto; min-height: 0; flex-direction: column; }
 
 /* --- chat header --- */
 .chathead {
@@ -358,17 +342,9 @@ button.pill:hover { border-color: var(--line); filter: brightness(1.12); }
   transition: border-color 0.14s, color 0.14s;
 }
 .linkchip:hover { border-color: var(--accent); color: var(--accent-ink); }
-
-/* --- phase rail --- */
-.phases { display: flex; align-items: center; gap: 0; padding: 10px 22px; border-bottom: 1px solid var(--line); background: var(--surface-2); overflow-x: auto; }
-.phase { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
-.phase .pd { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: 0 0 auto; }
-.phase .pl { font-size: 11.5px; color: var(--muted); }
-.phase.done .pd { background: var(--on); }
-.phase.done .pl { color: var(--ink-2); }
-.phase.now .pd { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 22%, transparent); animation: pulse 1.3s ease-in-out infinite; }
-.phase.now .pl { color: var(--ink); font-weight: 620; }
-.phase .bar { width: 22px; height: 1px; background: var(--line); margin: 0 8px; flex: 0 0 auto; }
+/* The one chip that acts rather than navigates — Open in terminal. */
+button.linkchip { font-family: inherit; cursor: pointer; }
+button.linkchip:disabled { opacity: 0.45; cursor: not-allowed; border-color: var(--line-soft); color: var(--ink-2); }
 
 /* --- transcript --- */
 .transcript { flex: 1 1 auto; overflow-y: auto; padding: 22px 22px 8px; min-height: 0; }
@@ -380,8 +356,6 @@ button.pill:hover { border-color: var(--line); filter: brightness(1.12); }
 .msg .meta .n { font-weight: 640; font-size: 13.5px; }
 .msg .meta .t { color: var(--muted); font-size: 11.5px; }
 .msg .text { white-space: pre-wrap; overflow-wrap: anywhere; }
-.msg .text p { margin: 0 0 8px; }
-.msg .text p:last-child { margin-bottom: 0; }
 .msg .text a { color: var(--accent-ink); }
 .msg .text code { background: var(--surface-3); padding: 1.5px 5px; border-radius: 5px; }
 .msg .text pre {
@@ -437,28 +411,75 @@ button.pill:hover { border-color: var(--line); filter: brightness(1.12); }
 .turn .tb { padding: 12px 14px; }
 .turn .tf { padding: 8px 13px; border-top: 1px solid var(--line-soft); font-size: 11.5px; color: var(--muted); display: flex; gap: 12px; flex-wrap: wrap; }
 
-/* Collapsed by default, both of them: the transcript is for reading what
- * happened, and a 40-call tool log inlined is not that. Open one and it stays
- * open — a stream delta patches the list in place rather than re-rendering. */
-.blocks { display: flex; gap: 7px; flex-wrap: wrap; margin-bottom: 11px; }
-.steps { margin: 0; }
-.steps[open] { flex: 1 1 100%; }
-.steps.think summary { border-style: dashed; }
-.steps.think .thought {
-  margin-top: 9px; padding: 10px 12px; border-left: 2px solid var(--line);
-  color: var(--muted); font-size: 12.5px; white-space: pre-wrap; max-height: 320px; overflow-y: auto;
+/* the live token meter, top right of the turn */
+.turn .th .meter { margin-left: auto; display: flex; gap: 10px; font-variant-numeric: tabular-nums; }
+.turn .th .meter .mt { color: var(--muted); font-size: 11px; }
+.turn .th .meter .mt b { color: var(--ink-2); font-weight: 620; }
+
+/* --- the streamed timeline ---
+   One row per content block, in the order it happened, with a fixed right-hand
+   gutter holding what that block cost. The gutter is the whole trick: forty
+   steps read as a table you can scan down rather than a wall of prose. */
+:root { --tokw: 62px; }
+.flow { display: flex; flex-direction: column; gap: 1px; }
+.flow:empty { display: none; }
+.fl { border-radius: 8px; }
+.fl .tok {
+  flex: 0 0 var(--tokw); width: var(--tokw); text-align: right;
+  font-size: 10.5px; color: var(--muted); font-variant-numeric: tabular-nums;
+  white-space: nowrap; cursor: default;
 }
-.steps summary {
-  cursor: pointer; list-style: none; font-size: 12px; color: var(--muted);
-  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px;
-  border: 1px solid var(--line-soft); border-radius: 999px; background: var(--surface-2);
+
+/* thinking — open while it streams, folded away once it stops */
+.fl.think { display: block; }
+.fl.think > summary {
+  cursor: pointer; list-style: none; display: flex; align-items: center; gap: 7px;
+  font-size: 12px; color: var(--muted); padding: 5px 2px; border-radius: 7px;
 }
-.steps summary::-webkit-details-marker { display: none; }
-.steps summary:hover { color: var(--ink); }
-.steps ol { margin: 9px 0 0; padding: 0 0 0 2px; list-style: none; display: flex; flex-direction: column; gap: 4px; }
-.steps li { display: flex; gap: 8px; font-size: 12px; align-items: baseline; }
-.steps .tn { color: var(--accent-ink); font-weight: 620; flex: 0 0 auto; }
-.steps .td { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fl.think > summary::-webkit-details-marker { display: none; }
+.fl.think > summary:hover { color: var(--ink-2); background: var(--surface-2); }
+.fl.think > summary .fk { font-style: italic; }
+.fl.think > summary .tok { margin-left: auto; }
+.fl.think[open] > summary .fk { color: var(--ink-2); }
+.fl.think .thought {
+  margin: 2px 0 8px; padding: 9px 12px; border-left: 2px solid var(--line);
+  color: var(--muted); font-size: 12.5px; line-height: 1.62; white-space: pre-wrap;
+  max-height: 340px; overflow-y: auto;
+}
+
+/* prose the model wrote mid-run — recorded all along, never shown until now */
+.fl.say { display: flex; align-items: flex-start; gap: 12px; padding: 3px 2px; }
+.fl.say .text { flex: 1 1 auto; min-width: 0; }
+.fl.say .tok { padding-top: 4px; }
+
+/* a tool call, and what it gave back */
+.fl.tool { padding: 3px 2px; }
+.fl.tool .fr { display: flex; align-items: baseline; gap: 8px; font-size: 12px; }
+.fl.tool .fr > svg { flex: 0 0 auto; color: var(--muted); align-self: center; }
+.fl.tool .tn { color: var(--accent-ink); font-weight: 620; flex: 0 0 auto; }
+.fl.tool .td {
+  color: var(--muted); flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px;
+}
+.tres { margin: 3px 0 4px 20px; font-size: 11.5px; }
+.tres .rp {
+  white-space: pre-wrap; word-break: break-word; color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.5;
+  padding: 6px 9px; border-left: 2px solid var(--line-soft); background: var(--surface-2);
+  border-radius: 0 6px 6px 0; max-height: 84px; overflow: hidden;
+}
+.tres.open .rp { max-height: 460px; overflow-y: auto; }
+.tres.bad .rp { border-left-color: var(--bad); color: var(--bad); }
+.tres .rmore {
+  margin-top: 3px; padding: 0; border: 0; background: none; cursor: pointer;
+  color: var(--muted); font-size: 10.5px; text-decoration: underline;
+}
+.tres .rmore:hover { color: var(--ink-2); }
+
+/* the closing answer, when it isn't already the last thing in the timeline */
+.turn .final { margin-top: 10px; }
+.turn .flow:empty + .final { margin-top: 0; }
 
 .caret { display: inline-block; width: 7px; height: 15px; vertical-align: -2px; background: var(--accent); animation: blink 1s steps(2) infinite; border-radius: 1px; }
 @keyframes blink { 50% { opacity: 0; } }
@@ -477,7 +498,6 @@ button.pill:hover { border-color: var(--line); filter: brightness(1.12); }
 }
 .cbox textarea::placeholder { color: var(--muted); }
 .crow { display: flex; align-items: center; gap: 10px; margin-top: 6px; }
-.chint { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* --- job option chips ---
    The row of pickers that says how the next job runs. Lives on the composer
@@ -572,6 +592,27 @@ button.pill:hover { border-color: var(--line); filter: brightness(1.12); }
 .dirfoot { display: flex; align-items: center; gap: 10px; padding: 11px 12px; border-top: 1px solid var(--line); }
 .dirfoot .d { font-size: 11.5px; color: var(--muted); }
 .dirfoot .spacer { flex: 1; }
+
+/* --- confirm dialog --- */
+.confirmscrim {
+  position: fixed; inset: 0; z-index: 96; background: rgba(0, 0, 0, 0.5);
+  display: none; place-items: center; padding: 24px;
+}
+.confirmscrim.open { display: grid; }
+.confirmbox {
+  width: min(420px, 100%); background: var(--surface); border: 1px solid var(--line);
+  border-radius: 16px; box-shadow: 0 26px 70px rgba(0, 0, 0, 0.45); padding: 18px 18px 14px;
+}
+.confirmtitle { font-size: 15px; font-weight: 660; letter-spacing: -0.01em; }
+.confirmbody { color: var(--ink-2); font-size: 13px; line-height: 1.5; margin-top: 7px; }
+.confirmbody .quote {
+  margin-top: 10px; padding: 8px 10px; border-radius: 9px;
+  background: var(--surface-3); border: 1px solid var(--line-soft);
+  color: var(--ink); font-size: 12.5px;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.confirmfoot { display: flex; align-items: center; gap: 8px; margin-top: 16px; }
+.confirmfoot .spacer { flex: 1; }
 
 .btn {
   display: inline-flex; align-items: center; gap: 6px; border-radius: 999px;
@@ -688,16 +729,6 @@ button.pill:hover { border-color: var(--line); filter: brightness(1.12); }
 }
 .stage .ic svg { width: 11px; height: 11px; stroke-width: 3.2; }
 
-.insp-sect {
-  font-size: 10.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase;
-  color: var(--muted); padding: 16px 6px 4px;
-}
-.kv { display: flex; gap: 10px; padding: 6px; font-size: 12px; align-items: baseline; }
-.kv .k { color: var(--muted); flex: 0 0 82px; }
-.kv .v { color: var(--ink-2); min-width: 0; overflow-wrap: anywhere; }
-.kv .v a { color: var(--accent-ink); text-decoration: none; }
-.kv .v a:hover { text-decoration: underline; }
-
 .insp-actions { display: flex; flex-direction: column; gap: 8px; padding: 12px 6px 0; }
 .insp-actions .btn { justify-content: center; }
 
@@ -724,8 +755,6 @@ button.pill:hover { border-color: var(--line); filter: brightness(1.12); }
 .chart .gridline { stroke: var(--line-soft); stroke-width: 1; }
 .chart .axis { fill: var(--muted); font-size: 10.5px; }
 .chart .hit { fill: transparent; cursor: pointer; }
-.chart .hit:hover + .colhi, .chart .col.hover { opacity: 1; }
-.chart .colhi { fill: var(--ink); opacity: 0; }
 .tooltip {
   position: absolute; pointer-events: none; opacity: 0; transform: translate(-50%, -100%);
   background: var(--surface-3); border: 1px solid var(--line); border-radius: 10px;
@@ -786,11 +815,11 @@ button.pill:hover { border-color: var(--line); filter: brightness(1.12); }
 .field { display: flex; flex-direction: column; gap: 5px; padding: 10px 0; }
 .field label { font-size: 12.5px; font-weight: 570; }
 .field .d { color: var(--muted); font-size: 11.5px; }
-.field input, .field select {
+.field input {
   background: var(--surface-2); border: 1px solid var(--line); border-radius: 9px;
   padding: 7px 10px; outline: none; font-size: 13px; width: 100%;
 }
-.field input:focus, .field select:focus { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
+.field input:focus { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); }
 .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 
 /* cadence: a number nobody remembers the units of, plus the four you actually pick */

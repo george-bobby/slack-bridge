@@ -57,11 +57,9 @@ function refreshCronInstalled() {
     { timeout: 4000 },
     (err) => {
       const next = !err;
-      if (next !== cronInstalled) {
-        cronInstalled = next;
-        bus.broadcast("state", snapshot());
-      }
+      if (next === cronInstalled) return;
       cronInstalled = next;
+      bus.broadcast("state", snapshot());
     }
   );
 }
@@ -193,12 +191,9 @@ function snapshot() {
     cronInstalled,
     cost: store.summariseCost(),
     jobs: { running: jobs.runningIds() },
-    meta: {
-      port: PORT,
-      root: ROOT,
-      workdir: jobs.resolveWorkdir(store.readConfig()),
-      paths: store.PATHS,
-    },
+    // Only what the page actually draws: the repo a new chat's job would run
+    // in, which the composer's picker opens on.
+    meta: { workdir: jobs.resolveWorkdir(store.readConfig()) },
     now: Date.now(),
   };
 }
@@ -220,7 +215,7 @@ const server = http.createServer(async (req, res) => {
     // Seed the new tab so it never renders an empty shell waiting for a tick.
     res.write(`event: state\ndata: ${JSON.stringify(snapshot())}\n\n`);
     res.write(
-      `event: runs\ndata: ${JSON.stringify({ runs: store.listRuns().map(store.summariseRun) })}\n\n`
+      `event: runs\ndata: ${JSON.stringify({ runs: store.listRunSummaries() })}\n\n`
     );
     return;
   }
@@ -243,7 +238,7 @@ const server = http.createServer(async (req, res) => {
 
   // --- sidebar -------------------------------------------------------------
   if (req.method === "GET" && p === "/api/runs") {
-    sendJson(res, 200, { runs: store.listRuns().map(store.summariseRun) });
+    sendJson(res, 200, { runs: store.listRunSummaries() });
     return;
   }
 
@@ -263,7 +258,10 @@ const server = http.createServer(async (req, res) => {
         sendJson(res, 404, { ok: false, error: "no such run" });
         return;
       }
-      sendJson(res, 200, { run, running: jobs.isRunning(id) });
+      // No `running` alongside it: the page tracks live jobs through the
+      // `jobs` event on the SSE stream, which is pushed the moment one starts
+      // or ends rather than only when a chat happens to be fetched.
+      sendJson(res, 200, { run });
       return;
     }
 
@@ -349,7 +347,7 @@ const server = http.createServer(async (req, res) => {
         const body = JSON.parse((await readBody(req)) || "{}");
         applyOpts(id, body.opts);
         const msg = jobs.startPipeline(id, { config: store.readConfig() });
-        bus.broadcast("runs", { runs: store.listRuns().map(store.summariseRun) });
+        bus.broadcast("runs", { runs: store.listRunSummaries() });
         sendJson(res, 200, { ok: true, message: msg });
       } catch (e) {
         sendJson(res, 409, { ok: false, error: String(e.message || e) });
@@ -359,6 +357,18 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "POST" && verb === "stop") {
       sendJson(res, 200, { ok: jobs.stop(id) });
+      return;
+    }
+
+    // Same chat, same session, real terminal. The dashboard is the better
+    // place to *watch* a run; it is a worse place to take one over, and until
+    // now the only way out was to go digging for the session id by hand.
+    if (req.method === "POST" && verb === "terminal") {
+      try {
+        sendJson(res, 200, { ok: true, ...(await jobs.openTerminal(id, { config: store.readConfig() })) });
+      } catch (e) {
+        sendJson(res, 409, { ok: false, error: String(e.message || e) });
+      }
       return;
     }
 
@@ -375,13 +385,13 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === "DELETE" && !verb) {
       if (jobs.isRunning(id)) {
-        sendJson(res, 409, { ok: false, error: "stop the running follow-up first" });
+        sendJson(res, 409, { ok: false, error: "stop the running job first" });
         return;
       }
-      try {
-        fs.unlinkSync(path.join(store.PATHS.runs, `${id}.json`));
-      } catch {}
-      bus.broadcast("runs", { runs: store.listRuns().map(store.summariseRun) });
+      // Purges the poller's activity entry too, or the next sync mirrors the
+      // chat straight back in — see store.deleteRun.
+      store.deleteRun(id);
+      bus.broadcast("runs", { runs: store.listRunSummaries() });
       sendJson(res, 200, { ok: true });
       return;
     }
@@ -397,12 +407,19 @@ const server = http.createServer(async (req, res) => {
       const body = JSON.parse((await readBody(req)) || "{}");
       const list = Array.isArray(body.mentions) ? body.mentions : [body];
       let changed = 0;
+      // Echoed back per mention so the caller can see where each one landed.
+      // `worked` tells /scan-mentions not to dispatch a second pipeline at a
+      // conversation one has already run against; the weaker `settled` is what
+      // lets scripts/probe.js skip starting a session for it at all.
+      const results = [];
       for (const m of list.slice(0, 200)) {
         const out = store.upsertMention(m);
-        if (out && out.dirty) changed++;
+        if (!out) continue;
+        if (out.dirty) changed++;
+        results.push({ ts: String(m.ts || m.runId || ""), ...out, runId: out.id });
       }
-      if (changed) bus.broadcast("runs", { runs: store.listRuns().map(store.summariseRun) });
-      sendJson(res, 200, { ok: true, changed });
+      if (changed) bus.broadcast("runs", { runs: store.listRunSummaries() });
+      sendJson(res, 200, { ok: true, changed, results });
     } catch (e) {
       sendJson(res, 400, { ok: false, error: String(e.message || e) });
     }
@@ -435,17 +452,34 @@ const server = http.createServer(async (req, res) => {
     try {
       action = JSON.parse((await readBody(req)) || "{}").action;
     } catch {}
-    if (!["cron", "cron-off"].includes(action)) {
-      sendJson(res, 400, { ok: false, error: "action must be cron | cron-off" });
+    if (!["start", "stop"].includes(action)) {
+      sendJson(res, 400, { ok: false, error: "action must be start | stop" });
       return;
     }
-    execFile(path.join(ROOT, "scripts", "install.sh"), [action], { timeout: 20000, cwd: ROOT }, (err, stdout, stderr) => {
-      refreshCronInstalled();
-      sendJson(res, err ? 500 : 200, {
-        ok: !err,
-        output: String(stdout || "") + String(stderr || ""),
-      });
-    });
+    // The poller-only subcommands, never the both-agents ones: `install.sh
+    // start` boots out the dashboard job, and this script is a *child* of the
+    // dashboard — so it would be killed part-way through and never bootstrap
+    // the dashboard back. Toggling the poller is all this route ever meant.
+    const SUBCOMMAND = { start: "poller-start", stop: "poller-stop" };
+    execFile(
+      path.join(ROOT, "scripts", "install.sh"),
+      [SUBCOMMAND[action]],
+      {
+        timeout: 20000,
+        cwd: ROOT,
+        // Same reason as lib/jobs.js: this server is itself a launchd job, so
+        // it inherits a near-empty PATH and hands it to anything it spawns.
+        // install.sh renders templates with `node`, which isn't on it.
+        env: { ...process.env, PATH: `${env.extraPath}:${process.env.PATH || "/usr/bin:/bin"}` },
+      },
+      (err, stdout, stderr) => {
+        refreshCronInstalled();
+        sendJson(res, err ? 500 : 200, {
+          ok: !err,
+          output: String(stdout || "") + String(stderr || ""),
+        });
+      }
+    );
     return;
   }
 
@@ -484,7 +518,7 @@ function pollFiles() {
   if (activityChanged) {
     const touched = store.syncFromActivity();
     if (touched.length) {
-      bus.broadcast("runs", { runs: store.listRuns().map(store.summariseRun) });
+      bus.broadcast("runs", { runs: store.listRunSummaries() });
       for (const id of touched) bus.broadcast("run-updated", { runId: id });
     }
     stateChanged = true;
@@ -519,5 +553,5 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`  runs:      ${store.PATHS.runs}`);
   console.log(`  config:    ${store.PATHS.config}`);
   console.log(`  follow-up: ${jobs.resolveWorkdir(config)}  (model: ${config.followup.model})`);
-  console.log(`\nPoller: ./scripts/install.sh cron   (launchd runs claude -p /scan-mentions)`);
+  console.log(`\nPoller: ./scripts/install.sh start   (launchd runs claude -p /scan-mentions)`);
 });

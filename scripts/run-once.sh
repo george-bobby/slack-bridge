@@ -63,7 +63,7 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >>"$LOG"; }
 # control panel if the plist's baked-in environment silently outranked it. The
 # one setting config.json cannot change on its own is the *cadence*: launchd
 # owns when this script fires (StartInterval), so intervalSec here only tells
-# the dashboard what to expect. `./install.sh cron` re-stamps the plist from
+# the dashboard what to expect. `./install.sh start` re-stamps the plist from
 # config.json — that is what the drawer's "Apply cadence" button runs.
 #
 # One node call, five lines out: a per-key helper would pay node's ~30ms
@@ -125,13 +125,13 @@ export SLACK_BRIDGE_INTERVAL="$_interval"
 # auto   scan, triage, and dispatch the oldest actionable one.
 export SLACK_BRIDGE_MODE="$_mode"
 
-# A tick that finds nothing still pays for a whole session: fresh process, no
-# cache reuse between runs. Measured on this machine, "do nothing and reply OK":
-#   opus  ~$0.274/tick   (27k cache-write tokens)
-#   haiku ~$0.019/tick   (8.6k)
+# Starting a session costs money whether or not it finds anything: fresh
+# process, no cache reuse between runs. Measured here, a tick that found
+# nothing still ran a median $0.094 on haiku — ~$27/day at 300s. That is what
+# gate 3 (probe.js) exists to avoid; it answers "is there anything at all?"
+# over plain HTTP for $0, and nothing below it runs unless the answer is yes.
 # Triage is easy classification work, so the scan runs on haiku and the
-# *pipeline* is escalated back to opus by /scan-mentions §5 when it dispatches.
-# Everything above this line is why the gates below exist.
+# *pipeline* is escalated back to opus by /scan-mentions when it dispatches.
 export SLACK_BRIDGE_SCAN_MODEL="$_model"
 
 # Outside these hours (local, 24h) nothing polls. ACTIVE_DAYS is the days to
@@ -179,6 +179,38 @@ if ! mkdir "$LOCK" 2>/dev/null; then
 fi
 echo "$$" >"$LOCK/pid"
 trap 'rm -rf "$LOCK"' EXIT
+
+# 3. The probe: "has anyone mentioned you since the watermark?", asked over
+#    plain HTTP with a Slack user token, for $0. This is the gate that decides
+#    the tick's cost — a session starts only when it says there is real work.
+#    It sits *after* the lock so a tick that's going to be skipped anyway
+#    (pipeline still running, 15-25 min) doesn't spend an API call to find out.
+#
+#    Exit codes, defined in probe.js:
+#      0   new mentions, written to data/probe.json — run the session
+#      10  nothing to do — skip, $0
+#      20  broken (no token, bad auth) — skip too, but log it
+#
+#    A non-zero code never starts a session. There is no fallback: the probe IS
+#    mention detection now, and a broken one means the poller is blind. That
+#    shows up as a stale heartbeat on the dashboard (probe.js withholds the
+#    heartbeat on 20) plus the log line below — which is what you want, rather
+#    than silently reverting to ~$0.09 a tick.
+probe_out="$(cd "$ROOT" && node scripts/probe.js 2>>"$LOG")"
+probe_status=$?
+
+if [[ "$probe_status" -ne 0 ]]; then
+  # 10 is the overwhelmingly common case and is deliberately not logged: at a
+  # 60s cadence it fires ~1400x/day and would bury every line that matters.
+  # Anything else is a real problem and gets a line.
+  [[ "$probe_status" -ne 10 ]] && log "probe broken (exit=$probe_status): $probe_out"
+  exit 0
+fi
+
+# Hand the session what the probe already found, so /scan-mentions reads a
+# local file instead of re-running the search through the MCP connector.
+export SLACK_BRIDGE_PREFETCH="$ROOT/data/probe.json"
+log "probe: $probe_out"
 
 # --- The tick --------------------------------------------------------------
 # --dangerously-skip-permissions is required, not optional: an unattended run

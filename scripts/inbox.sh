@@ -4,18 +4,31 @@
 #
 #   echo '{"mentions":[ … ]}' | inbox.sh
 #
-# Each mention: { "runId": "<slack ts>", "ts": "<slack ts>", "who": "…",
+# Each mention: { "runId": "<thread ts>", "ts": "<slack ts>", "who": "…",
 #                 "userId": "U…", "channel": "#…", "channelId": "C…",
 #                 "threadTs": "…", "text": "…", "permalink": "…",
 #                 "triage": "actionable" | "skip", "triageReason": "…" }
+#
+# `runId` is the **thread** ts, not the message ts: one thread is one chat.
+# `ts` stays the message's own, and is how a re-post of the same mention is
+# recognised as a no-op rather than filed twice.
 #
 # Everything the search returned goes here, actionable or not — the inbox is
 # the list of "things that mentioned you", and the triage verdict is a column
 # in it, not a filter on it. A mention already worked is never downgraded;
 # re-posting the same one on a later tick is a no-op.
 #
+# Prints the dashboard's reply on stdout — one `results` entry per mention:
+#   { "ts", "runId", "created", "appended", "worked", "settled" }
+# `worked: true` means a pipeline or job has actually run against that thread —
+# a follow-up in an existing conversation rather than a new request, so
+# /scan-mentions does not dispatch a second pipeline at it. `settled` is the
+# weaker "already decided" (worked, or triaged out) that probe.js uses to skip
+# starting a session at all.
+#
 # BEST EFFORT, ALWAYS: exits 0 whether or not the dashboard is listening, never
-# blocks longer than 3s, prints nothing on success.
+# blocks longer than 3s. A dashboard that is closed prints nothing, and the
+# caller must treat that as "no information", never as "nothing was filed".
 
 # The dashboard's port lives in .env, so this and index.js agree without
 # either one hard-coding it. Already-set wins, as everywhere else.
@@ -41,12 +54,24 @@ node -e '
         timeout: 3000,
         headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) },
       },
-      (res) => res.resume()
+      (res) => {
+        // Relayed so the caller can see where each mention landed. Anything
+        // that is not a clean JSON body is swallowed — this is a side channel,
+        // not a contract the tick may fail on.
+        let out = "";
+        res.on("data", (c) => (out += c));
+        res.on("end", () => {
+          try {
+            JSON.parse(out);
+            process.stdout.write(out);
+          } catch {}
+        });
+      }
     );
     req.on("error", () => {});
     req.on("timeout", () => req.destroy());
     req.end(payload);
   });
-' >/dev/null 2>&1
+' 2>/dev/null
 
 exit 0

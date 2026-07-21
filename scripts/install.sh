@@ -17,8 +17,14 @@
 #   ./scripts/install.sh            render + create/refresh the symlinks
 #   ./scripts/install.sh render     render only (after editing .env or templates/)
 #   ./scripts/install.sh uninstall  remove the symlinks (project files are left alone)
-#   ./scripts/install.sh cron       start the poller + dashboard under launchd
-#   ./scripts/install.sh cron-off   stop them both (symlinks stay)
+#   ./scripts/install.sh start      start the poller + dashboard under launchd
+#   ./scripts/install.sh stop       stop them both (symlinks stay)
+#
+# And two the dashboard calls, which move the poller without touching the
+# dashboard job it is itself running under:
+#
+#   ./scripts/install.sh poller-start
+#   ./scripts/install.sh poller-stop
 
 set -euo pipefail
 
@@ -93,9 +99,21 @@ if [[ "${1:-}" == "render" ]]; then
 fi
 
 # --- the poller: launchd runs `claude -p /scan-mentions` on an interval ----
-if [[ "${1:-}" == "cron" ]]; then
+# The poller half is kept separable from the dashboard half on purpose.
+#
+# The dashboard's Schedule panel toggles the poller by POSTing to /api/cron,
+# which runs *this script as a child of the dashboard process*. So any path
+# that boots out the dashboard job also kills the script running it, part-way
+# through, before it can bootstrap the dashboard back — and since `bootout`
+# removes the job outright, KeepAlive doesn't return it either. The dashboard
+# just stays dead until someone runs `start` from a terminal.
+#
+# Hence `poller-start` / `poller-stop` below, which the API calls instead. That
+# is also the more correct thing to ask for: the dashboard is by definition
+# already running when it asks, so it has no business restarting itself.
+
+poller_start() {
   [[ -f "$PLIST_SRC" ]] || { echo "error: missing $PLIST_SRC" >&2; exit 1; }
-  [[ -f "$DASH_PLIST_SRC" ]] || { echo "error: missing $DASH_PLIST_SRC" >&2; exit 1; }
   render
   chmod +x "$SCRIPTS/run-once.sh" "$SCRIPTS/emit.sh" "$SCRIPTS/inbox.sh"
   mkdir -p "$HOME/Library/LaunchAgents" "$PROJ/logs" "$PROJ/data"
@@ -120,8 +138,20 @@ if [[ "${1:-}" == "cron" ]]; then
       "$PLIST_SRC" >"$PLIST_DST"
 
   reload_job "$LABEL" "$PLIST_DST"
+}
 
-  # --- dashboard ------------------------------------------------------------
+poller_stop() {
+  launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+  [[ -f "$PLIST_DST" ]] && rm "$PLIST_DST" && echo "removed $PLIST_DST"
+  # Explicit: a missing plist makes the line above return non-zero, and as the
+  # last statement of a function `set -e` would read that as the call failing.
+  return 0
+}
+
+dashboard_start() {
+  [[ -f "$DASH_PLIST_SRC" ]] || { echo "error: missing $DASH_PLIST_SRC" >&2; exit 1; }
+  mkdir -p "$HOME/Library/LaunchAgents" "$PROJ/logs"
+
   # launchd runs jobs with a near-empty PATH, so resolve node here. Follow the
   # symlink: ~/.local/bin shims can disappear on a version switch, and a dead
   # ProgramArguments[0] just makes launchd fail the job silently.
@@ -160,6 +190,19 @@ if [[ "${1:-}" == "cron" ]]; then
     curl -fs -o /dev/null --max-time 1 "http://127.0.0.1:$PORT/" 2>/dev/null && DASH_UP=1 && break
     sleep 0.5
   done
+  return 0
+}
+
+dashboard_stop() {
+  launchctl bootout "gui/$UID/$DASH_LABEL" 2>/dev/null || true
+  [[ -f "$DASH_PLIST_DST" ]] && rm "$DASH_PLIST_DST" && echo "removed $DASH_PLIST_DST"
+  return 0
+}
+
+# --- both agents: what you run from a terminal ------------------------------
+if [[ "${1:-}" == "start" ]]; then
+  poller_start
+  dashboard_start
 
   echo
   echo "loaded $LABEL — polling every ${INTERVAL}s, headless."
@@ -174,16 +217,28 @@ if [[ "${1:-}" == "cron" ]]; then
   fi
   echo "  logs:   $PROJ/logs/dashboard.{out,err}.log"
   echo
-  echo "Both survive logout and reboot. Stop them with: ./scripts/install.sh cron-off"
+  echo "Both survive logout and reboot. Stop them with: ./scripts/install.sh stop"
   exit 0
 fi
 
-if [[ "${1:-}" == "cron-off" ]]; then
-  launchctl bootout "gui/$UID/$DASH_LABEL" 2>/dev/null || true
-  [[ -f "$DASH_PLIST_DST" ]] && rm "$DASH_PLIST_DST" && echo "removed $DASH_PLIST_DST"
-  launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
-  [[ -f "$PLIST_DST" ]] && rm "$PLIST_DST" && echo "removed $PLIST_DST"
+if [[ "${1:-}" == "stop" ]]; then
+  dashboard_stop
+  poller_stop
   echo "poller and dashboard stopped — nothing is watching Slack now."
+  exit 0
+fi
+
+# --- poller only: what the dashboard's Schedule panel calls -----------------
+# Never touches the dashboard job. See the note above poller_start().
+if [[ "${1:-}" == "poller-start" ]]; then
+  poller_start
+  echo "loaded $LABEL — polling every ${INTERVAL}s. Dashboard untouched."
+  exit 0
+fi
+
+if [[ "${1:-}" == "poller-stop" ]]; then
+  poller_stop
+  echo "poller stopped — nothing is watching Slack. Dashboard untouched."
   exit 0
 fi
 
@@ -193,6 +248,15 @@ if [[ "${1:-}" == "uninstall" ]]; then
   [[ -L "$SKILL_DST" ]] && rm "$SKILL_DST" && echo "unlinked $SKILL_DST"
   echo "done — project files untouched at $PROJ"
   exit 0
+fi
+
+# No argument means the default install. Anything left here is a typo, and now
+# that there are commands worth mistyping, silently re-running the symlink
+# install is a worse answer than saying so.
+if [[ -n "${1:-}" ]]; then
+  echo "error: unknown command '$1'" >&2
+  echo "usage: ./scripts/install.sh [render|start|stop|poller-start|poller-stop|uninstall]" >&2
+  exit 2
 fi
 
 render
@@ -223,5 +287,5 @@ echo "  $CMD_DST   -> $CMD_SRC"
 echo "  $SKILL_DST -> $SKILL_SRC"
 echo
 echo "next:"
-echo "  ./scripts/install.sh cron   # starts the poller AND the dashboard under launchd"
+echo "  ./scripts/install.sh start  # starts the poller AND the dashboard under launchd"
 echo "                             # dashboard: http://localhost:$PORT"

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Template. `./scripts/install.sh cron` substitutes the __TOKENS__ from .env +
+  Template. `./scripts/install.sh start` substitutes the __TOKENS__ from .env +
   data/config.json and installs the result into ~/Library/LaunchAgents/.
   Don't load this file directly.
 
@@ -20,7 +20,7 @@
 
   <!-- Every tick costs a full session even when it finds nothing, so cadence
        is the single biggest cost lever. 300s = 5 min of worst-case latency
-       for ~1/5 the spend of 60s. `./scripts/install.sh cron` stamps this from
+       for ~1/5 the spend of 60s. `./scripts/install.sh start` stamps this from
        data/config.json's poller.intervalSec, which the dashboard writes. -->
   <key>StartInterval</key>
   <integer>__INTERVAL__</integer>

@@ -33,8 +33,9 @@
 
         <div class="spacer"></div>
 
-        <span class="pill" id="statusPill"><span class="dot"></span><span id="statusText">connecting…</span></span>
-        <button class="pill hide-sm" id="runnerPill"><span id="runnerText">…</span></button>
+        <!-- One pill, two facts: is anything watching Slack, and how often.
+             They were separate pills that always had to be read together. -->
+        <button class="pill" id="statusPill"><span class="dot"></span><span id="statusText">connecting…</span></button>
         <button class="pill money hide-sm" id="costPill" title="Spent today — open the spend breakdown">—</button>
 
         <!-- Two states, not three: this answers "what does it do when it finds
@@ -113,11 +114,11 @@
              Activity tab, which is gone. They render empty almost always. -->
         <div id="banners"></div>
 
-        <section class="view active" id="view-chats">
+        <section class="view">
           <div id="chatEmpty" class="empty">
             <div class="inner">
               <h2>Nothing selected</h2>
-              <p id="emptyNote">
+              <p>
                 Every @mention of you lands in the list on the left — worked, skipped or
                 untouched. Open one to read what happened, or reply to pick it back up.
               </p>
@@ -148,7 +149,7 @@
       </main>
 
       <!-- =================================================== inspector === -->
-      <aside class="inspector" id="inspector">
+      <aside class="inspector">
         <div class="insp-head">
           <div style="min-width: 0">
             <div class="t" id="inspTitle">Run status</div>
@@ -170,7 +171,7 @@
     <div class="scrim" id="scrim"></div>
 
     <!-- ---------------------------------------------------- schedule --- -->
-    <aside class="drawer" id="panelSchedule" data-panel="schedule" aria-hidden="true">
+    <aside class="drawer" id="panelSchedule" aria-hidden="true">
       <header>
         <h2>Schedule</h2>
         <div class="spacer"></div>
@@ -239,7 +240,7 @@
     </aside>
 
     <!-- ------------------------------------------------------- spend --- -->
-    <aside class="drawer" id="panelSpend" data-panel="spend" aria-hidden="true">
+    <aside class="drawer" id="panelSpend" aria-hidden="true">
       <header>
         <h2>Spend</h2>
         <div class="spacer"></div>
@@ -276,7 +277,7 @@
     </aside>
 
     <!-- ---------------------------------------------------- settings --- -->
-    <aside class="drawer" id="panelSettings" data-panel="settings" aria-hidden="true">
+    <aside class="drawer" id="panelSettings" aria-hidden="true">
       <header>
         <h2>Settings</h2>
         <div class="spacer"></div>
@@ -357,6 +358,23 @@
           <div class="spacer"></div>
           <button class="btn" id="dirCancel">Cancel</button>
           <button class="btn primary" id="dirChoose">Use this folder</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================================================== confirm ===
+         Deleting a chat throws away a transcript that cannot be rebuilt — the
+         poller's watermark has long since moved past the mention — so it asks
+         first. Deliberately a real dialog rather than window.confirm(): this
+         one has to name what is about to go, and how much it cost to make. -->
+    <div class="confirmscrim" id="confirmScrim">
+      <div class="confirmbox" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle">
+        <div class="confirmtitle" id="confirmTitle"></div>
+        <div class="confirmbody" id="confirmBody"></div>
+        <div class="confirmfoot">
+          <div class="spacer"></div>
+          <button class="btn" id="confirmNo">Cancel</button>
+          <button class="btn danger" id="confirmYes">Delete</button>
         </div>
       </div>
     </div>
