@@ -148,6 +148,13 @@ This is the common case for the noise that used to spawn duplicates: @Linear
 answering the ticket the pipeline just filed, a bot posting a build status, a
 colleague adding "+1" or a screenshot. None of them are a new job.
 
+Note that a follow-up posted *while* the pipeline was still running has usually
+already been dealt with: before it replies, the pipeline re-reads its own thread
+and folds anything new into the PR it just opened (`slack-fetch-pipeline` §8.5).
+So the messages that reach here are mostly the ones that landed *after* the run
+finished — still not a second pipeline run, and still {{SLACK_USER_NAME}}'s to
+pick up from the composer, but do not assume they are unread by the run.
+
 **The one exception**, and it is genuinely rare: the thread has moved on to a
 second, *unrelated* request — a different bug, a different feature — that the
 existing run neither covered nor could have. Only then, re-post the mention to

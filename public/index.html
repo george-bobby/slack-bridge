@@ -357,6 +357,19 @@
           <div class="optgrid" id="defaultOpts"></div>
           <div class="d" id="defaultOptsNote"></div>
         </div>
+
+        <!-- Browser-level, not a server setting: it lives in localStorage and
+             is per browser, because the permission it depends on is too. -->
+        <div class="sect">
+          <div class="lbl">Notifications</div>
+          <div class="row">
+            <div class="label">
+              <div class="t">Tell me when a session needs an answer</div>
+              <div class="d" id="notifyNote">—</div>
+            </div>
+            <label class="sw-toggle"><input type="checkbox" id="notifySwitch" /><span class="track"></span></label>
+          </div>
+        </div>
       </div>
     </aside>
 
@@ -407,6 +420,9 @@
             <div class="t" id="memTitle">Memory</div>
             <div class="s mono" id="memDir">—</div>
           </div>
+          <!-- Writing one by hand is rarer than reading or correcting one, so it
+               is a quiet button beside the title rather than a primary action. -->
+          <button class="btn ghost" id="memNew" title="Write a new memory by hand">New</button>
           <button class="iconbtn panel-close" id="memClose" title="Close (Esc)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
               <path d="M6 6l12 12M18 6L6 18" />
@@ -417,6 +433,30 @@
         <div class="membody">
           <div class="memlist" id="memList"></div>
           <div class="mempane">
+            <!-- Say the thing; the shaping is not yours to do.
+                 Naming the file, picking the section and — above all — noticing
+                 that a memory already covers this ground are judgements that
+                 need the existing memories *read*, which a form cannot do. So
+                 this is one box, and a read-only session turns it into a draft
+                 you approve. -->
+            <form class="memform" id="memForm" hidden>
+              <div class="t">Remember something</div>
+              <div class="s">
+                Write it however you'd say it out loud. Claude reads what this repo already remembers, folds it into the
+                closest existing memory or writes a new one, and shows you the draft before anything is saved.
+              </div>
+              <textarea
+                id="memFormText"
+                rows="7"
+                placeholder="e.g. Always rebase on main and re-sync the Linear description in place before pushing — appending a second description is what makes the ticket unreadable."
+              ></textarea>
+              <div class="formfoot">
+                <div class="d" id="memFormNote"></div>
+                <div class="spacer"></div>
+                <button type="button" class="btn ghost" id="memFormCancel">Cancel</button>
+                <button type="submit" class="btn primary" id="memFormCreate">Draft it</button>
+              </div>
+            </form>
             <!-- Frontmatter is metadata the memory system writes and reads by
                  key, so it is shown rather than edited: a WYSIWYG pass over
                  YAML would reformat it into something that no longer parses. -->

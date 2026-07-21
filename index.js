@@ -28,9 +28,11 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const { execFile } = require("child_process");
+const { Readable } = require("stream");
 
 const env = require("./lib/env");
 const store = require("./lib/store");
+const slack = require("./lib/slack");
 const jobs = require("./lib/jobs");
 const memory = require("./lib/memory");
 const proposals = require("./lib/proposals");
@@ -135,6 +137,85 @@ function serveStatic(res, urlPath) {
   });
 }
 
+/* ----------------------------------------------------- slack attachments */
+
+/**
+ * Stream one Slack attachment to the page, with the token attached here.
+ *
+ * The whole reason this route exists is that `files.slack.com` serves nothing
+ * without an `Authorization` header, so the page cannot fetch an attachment
+ * itself and must not be handed a token to try. See lib/slack.js.
+ *
+ * Addressed by (run, file id) rather than by URL. A URL parameter would make
+ * this an open proxy that attaches a workspace credential to anything asked of
+ * it; a file id can only resolve to a URL some message in that chat already
+ * recorded.
+ *
+ * The response headers are the other half. These are bytes a colleague chose,
+ * served from the origin that can start a Claude session with permissions
+ * skipped — so the type is the one *we* recorded rather than whatever Slack
+ * echoes back, sniffing is off, anything that isn't obviously media downloads
+ * instead of rendering, and the CSP means even an HTML file that got through
+ * would run nothing.
+ */
+function findAttachment(run, fileId) {
+  const id = String(fileId || "");
+  if (!id) return null;
+  for (const m of run.messages || []) {
+    for (const f of m.files || []) if (f && f.id === id) return f;
+  }
+  return null;
+}
+
+async function serveSlackFile(req, res, params) {
+  const id = store.safeId(String(params.get("run") || ""));
+  const run = id ? store.loadRun(id) : null;
+  const file = run ? findAttachment(run, params.get("id")) : null;
+  if (!file) {
+    sendJson(res, 404, { ok: false, error: "no such attachment" });
+    return;
+  }
+
+  // The poster frame, when the page is drawing a video it hasn't played yet.
+  const poster = params.get("v") === "thumb" && file.thumb;
+  const src = poster ? file.thumb : file.url;
+  const mime = poster ? "image/jpeg" : file.mime;
+
+  let upstream;
+  try {
+    upstream = await slack.fetchFile(src, { range: req.headers.range });
+  } catch (e) {
+    // 502 and not 404: the file exists, we could not get it — almost always
+    // the missing `files:read` scope, and the page says so on the card.
+    sendJson(res, 502, { ok: false, error: String(e.message || e) });
+    return;
+  }
+
+  const name = String(file.name || "attachment").replace(/["\\\r\n]/g, "");
+  const headers = {
+    "Content-Type": mime,
+    "Content-Disposition": `${slack.INLINE.test(mime) ? "inline" : "attachment"}; filename="${name}"`,
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": "default-src 'none'; sandbox",
+    "Accept-Ranges": "bytes",
+    // Private and short: a chat re-renders on every SSE tick, and re-pulling a
+    // 5MB screen recording from Slack each time would be absurd.
+    "Cache-Control": "private, max-age=3600",
+  };
+  for (const [from, to] of [["content-length", "Content-Length"], ["content-range", "Content-Range"]]) {
+    const v = upstream.headers.get(from);
+    if (v) headers[to] = v;
+  }
+
+  res.writeHead(upstream.status, headers);
+  const body = Readable.fromWeb(upstream.body);
+  // Scrubbing a video leaves half-read responses behind constantly; without
+  // this each one holds a socket to Slack open until it times out.
+  res.on("close", () => body.destroy());
+  body.on("error", () => res.destroy());
+  body.pipe(res);
+}
+
 /* -------------------------------------------------------------- job opts */
 
 /** Fold a composer's picks into a chat before its job launches. Silent when
@@ -196,7 +277,7 @@ function snapshot() {
     state: store.readState(),
     cronInstalled,
     cost: store.summariseCost(),
-    jobs: { running: jobs.runningIds() },
+    jobs: { running: jobs.runningIds(), awaiting: jobs.awaitingIds() },
     // Only what the page actually draws: the repo a new chat's job would run
     // in, which the composer's picker opens on.
     meta: { workdir: jobs.resolveWorkdir(store.readConfig()) },
@@ -323,6 +404,31 @@ const server = http.createServer(async (req, res) => {
         ok(memory.archive(workdir, body.name));
       } else if (req.method === "POST" && verb === "/restore") {
         ok(memory.restore(workdir, body.name));
+      } else if (req.method === "POST" && verb === "/draft") {
+        // You type the point; a read-only session decides whether the repo
+        // already remembers it and writes the file properly either way. What
+        // comes back is a proposal — reviewed in the same editor, written by
+        // the same validated path — so drafting can never itself touch
+        // ~/.claude.
+        const info = memory.list(workdir, { usage: false });
+        const draft = await jobs.draftMemory(body.text, {
+          config: store.readConfig(),
+          run: runId ? store.loadRun(runId) : null,
+          memoryDir: info.dir,
+          project: info.project,
+        });
+        // Keyed by a synthetic id, not a run: this came from you, not a
+        // mention, and it must not collide with a run's own proposal.
+        const id = `draft-${Date.now().toString(36)}`;
+        const rec = proposals.propose(id, {
+          ...draft,
+          citation: "typed in the dashboard",
+          workdir,
+          // Yours is ripe immediately — the recurrence bar exists to stop
+          // unattended runs banking noise, and you are neither.
+          ripeNow: true,
+        });
+        ok({ ...rec, draftedFrom: String(body.text || "").slice(0, 200) });
       } else if (req.method === "POST" && verb === "/relist") {
         ok(memory.relist(workdir, body.name, { section: body.section }));
       } else {
@@ -331,6 +437,12 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       sendJson(res, 400, { ok: false, error: String(e.message || e) });
     }
+    return;
+  }
+
+  // --- a Slack attachment --------------------------------------------------
+  if (req.method === "GET" && p === "/api/slack/file") {
+    await serveSlackFile(req, res, url.searchParams);
     return;
   }
 
@@ -387,7 +499,7 @@ const server = http.createServer(async (req, res) => {
 
         // A `memory` event is a *proposal*, never a memory: it lands in
         // data/runs/memories/, which no session loads, and is promoted only by
-        // recurrence or by you (see lib/proposals.js §8.5 of the skill). Filed
+        // recurrence or by you (see lib/proposals.js §8.7 of the skill). Filed
         // through the narration route on purpose — emit.sh stays the single way
         // a headless run talks to the dashboard, and a proposal that fails to
         // parse must not cost the run its stage line.
@@ -477,6 +589,29 @@ const server = http.createServer(async (req, res) => {
         bus.broadcast("runs", { runs: store.listRunSummaries() });
         sendJson(res, 200, { ok: true, message: msg });
       } catch (e) {
+        sendJson(res, 409, { ok: false, error: String(e.message || e) });
+      }
+      return;
+    }
+
+    // Answer whatever the running session stopped to ask — a permission
+    // request, a question, or a plan waiting for approval. The session is
+    // blocked until this lands, which is why it is the one route that reaches
+    // straight into a live child process rather than going through the run file.
+    if (req.method === "POST" && verb === "answer") {
+      try {
+        const body = JSON.parse((await readBody(req)) || "{}");
+        const askId = String(body.askId || "");
+        if (!askId) throw new Error("which question?");
+        const out = jobs.answerAsk(id, askId, {
+          behavior: body.behavior,
+          message: body.message,
+          answers: body.answers,
+        });
+        sendJson(res, 200, out);
+      } catch (e) {
+        // 409, not 400: the usual cause is a second tab (or a stale one) having
+        // answered it already, which is a race rather than a bad request.
         sendJson(res, 409, { ok: false, error: String(e.message || e) });
       }
       return;
@@ -656,6 +791,10 @@ function pollFiles() {
 /* -------------------------------------------------------------------- go */
 
 store.ensureRunsDir();
+// Every session we could have been asked a question by died when this process
+// did, so nothing on disk is still waiting for an answer. Sweep before the
+// first render or the sidebar comes up claiming chats need you.
+store.clearPendingAsks();
 store.syncFromActivity(); // backfill chats for everything the poller logged before today
 refreshCronInstalled();
 setInterval(refreshCronInstalled, 15000).unref();

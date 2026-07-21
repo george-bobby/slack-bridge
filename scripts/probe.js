@@ -41,6 +41,7 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 const env = require("../lib/env");
+const slack = require("../lib/slack");
 
 const ROOT = path.join(__dirname, "..");
 const STATE = path.join(ROOT, "data", "state.json");
@@ -380,6 +381,11 @@ async function main() {
       threadTs,
       text: String(m.text || ""),
       permalink,
+      // Free: the match already carries its attachments, and this is the only
+      // moment anything in the system sees them. Nothing else here has a token
+      // with `search:read`, and the chat has no other way to learn that the
+      // message it is showing had a screen recording under it.
+      files: slack.filesOf(m),
     });
   }
 

@@ -5,7 +5,8 @@
 #   emit.sh <runId> <phase> "<one line>" [key=value ...]
 #
 #   phase: queued | context | root-cause | verdict | linear | plan | build
-#          | verify | pr | review | resolve | memory | reply | done | error
+#          | verify | pr | review | resolve | sweep | memory | reply | done
+#          | error
 #   keys:  prUrl, linearUrl, action, who, channel, channelId, userId,
 #          permalink, threadTs, message
 #   memory: verdict, territory, target, name, title, section, citation,

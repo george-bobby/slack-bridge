@@ -59,7 +59,8 @@ launchd → run-once.sh                                    (every 60s)
    2. claude -p "/scan-mentions"                            only if 1 found something
         triage → oldest actionable one → subagent runs slack-fetch-pipeline
         to completion (root-cause → @Linear ticket → build → PR → request
-        Codex review → poll until it lands → /resolve → reply;
+        Codex review → poll until it lands → /resolve → sweep the thread
+        for follow-ups and fold them into the same PR → reply;
         too big to build blind → write a plan instead, stop before code)
    3. advance watermark, update activity.json
         ▲ reads config.json        ▼ writes state/activity
@@ -94,7 +95,7 @@ slack-bridge/
 │   ├── jobs.js           spawns follow-ups & manual runs, streams them back
 │   ├── memory.js         reads/writes ~/.claude/projects/<repo>/memory/*.md
 │   └── bus.js            server-sent events (the UI never polls)
-├── public/               index.html + app.css + app.js
+├── public/               index.html + app.css + app.js + logo.png
 │   └── vendor/           the Milkdown editor, pinned and committed (see below)
 ├── templates/            the prompts, with {{TOKENS}} where your values go
 │   ├── scan-mentions.md                  the poller
@@ -280,10 +281,16 @@ the start of every tick.
 ## Follow-ups and manual starts
 
 Typing into a chat, or pressing **Start** on an unworked mention, spawns a real
-headless session (`claude -p --output-format stream-json`) and streams it into
-the transcript. Continuity is by minted uuid: the first job passes
-`--session-id <uuid>`, every later one `--resume <uuid>`, so the expensive
-context preamble is written once per chat.
+headless session (`claude -p --output-format stream-json --input-format
+stream-json`) and streams it into the transcript. Continuity is by minted uuid:
+the first job passes `--session-id <uuid>`, every later one `--resume <uuid>`,
+so the expensive context preamble is written once per chat.
+
+The prompt travels on **stdin** rather than in argv, because stdin has to stay
+open anyway — it's the channel an answer goes back down when the session stops
+to ask you something (see [Answering a session](#answering-a-session)). The cost
+is that the child no longer exits by itself: `result` is what closes stdin, and
+that's what makes a job end.
 
 The chat header's **Terminal** chip hands that uuid over, running
 `claude --resume <uuid>` in the repo the session was minted in — but *without*
@@ -296,9 +303,10 @@ The chips beside **Send** decide what the next job in *this* chat does:
 
 | Chip | Becomes | Notes |
 | --- | --- | --- |
-| **Mode** — Plan | `--permission-mode plan` | Reads and investigates, writes nothing. |
-| **Mode** — Edit | `--permission-mode acceptEdits` | Edits files, but **Bash is refused** — no tests, commits or pushes. |
-| **Mode** — Full access | `--dangerously-skip-permissions` | The default. Edits files, pushes commits, can post to Slack. |
+| **Mode** — Plan | `--permission-mode plan` | Reads and investigates, writes nothing — then asks you to approve a plan. Approve it and the same session builds it. |
+| **Mode** — Manual | `--permission-mode manual` | Asks before **every** tool call. Slow, completely supervised. |
+| **Mode** — Edit | `--permission-mode acceptEdits` | Edits files freely, asks before each shell command. |
+| **Mode** — Full access | `--dangerously-skip-permissions` | The default. Edits files, pushes commits, can post to Slack. Only stops for a question it genuinely can't answer. |
 | **Model** | `--model <alias>` | opus / sonnet / haiku / fable. |
 | **Thinking** | `--effort <level>` | *Auto* passes no flag. |
 | **Capacity** | `--model <alias>[1m]` | The 1M-context variant. |
@@ -309,6 +317,94 @@ The chips beside **Send** decide what the next job in *this* chat does:
 > in `permissionArgs()`, and the narrowed modes never get the skip flag. Because
 > the run is headless, the chosen mode is also restated in the prompt on every
 > turn, not just the opening preamble.
+
+## Answering a session
+
+Every job also runs with `--permission-prompt-tool stdio`. That one flag is what
+makes the dashboard a console rather than a viewer:
+
+- a permission request arrives as a `control_request` on stdout **instead of
+  being silently refused**, so you decide, mid-run, from the chat;
+- it puts `AskUserQuestion`, `EnterPlanMode` and `ExitPlanMode` into the
+  session's toolset. They are **absent** from a headless session otherwise —
+  which is why plan mode used to be a dead end rather than a plan you approve.
+
+Prompts reach you in **every** mode, including full access. Under
+`bypassPermissions` nothing routes to you except tools that flatly require a
+human (`requires_user_interaction`), so the default job is exactly as unattended
+as it was — it just stops guessing when it needs a real decision, instead of
+being told *"the user did not answer the questions"* and inventing one.
+
+The card renders inline in the transcript, against the tool call it's about:
+
+| The session calls | You get |
+| --- | --- |
+| `AskUserQuestion` | The question, with its named options as buttons, plus a free-text box. Multi-select collects and sends together. |
+| `ExitPlanMode` | The rendered plan, **Approve — start building** / **Send it back**. Approving promotes the session out of plan mode and it continues into the work. |
+| anything else | The tool, its arguments, why it was stopped — **Allow** / **Deny**. |
+
+A refusal carries a **message** back to the model rather than a bare no. That
+field matters more than it looks: denied with a reason, a run re-plans around
+it; denied silently, it usually just tries the same thing again.
+
+### How you find out
+
+- **A desktop notification**, the moment the session blocks. **Clicking it
+  focuses the tab, opens that chat and scrolls the card into view** — it lands
+  you on the actual question, not on the dashboard's front page.
+- **The tab title** becomes `(1) Needs you · Slack Bridge` — the only part of
+  the page you can see while looking at something else.
+- **The sidebar row** gets a pulsing amber pip, a `needs you` badge, and a
+  one-line note of what it wants (`Write: …/api/export.js`).
+- **A strip above the composer** in the open chat, with a jump to the card.
+
+Notifications are the browser's own (`new Notification`, no service worker and
+no server-side push — `localhost` is a secure context, so neither is needed).
+They're **off until you turn them on**, from the *Notifications* row in Settings
+or the **Notify me next time** button that appears on the waiting strip. The
+choice is per browser, in `localStorage` under `sb-notify`, because the
+permission it rides on is per browser too.
+
+One notification per chat (`tag: ask-<runId>`), so a run that asks twice
+replaces its own rather than stacking, and `requireInteraction` keeps it up
+until you deal with it — the session is blocked either way, and a question that
+auto-dismissed after four seconds is a question missed. Nothing is raised when
+you already have that chat focused on screen.
+
+> The trade-off is honest: with no tab open there is no notification. The tab
+> title and the sidebar still carry it, and the run waits indefinitely either
+> way. An earlier version posted from a macOS app bundle to cover that case;
+> it was dropped because it could never do the one thing that matters most
+> here — click through to the exact question.
+
+An ask is a question a **live child process** is blocked on, and those children
+die with the server — so `store.clearPendingAsks()` sweeps every `pendingAsk` at
+boot. The step is marked *cancelled* rather than deleted, because it did happen,
+and an unanswered ask is usually the explanation for whatever the run did next.
+
+## Attachments
+
+Screenshots and screen recordings render inline in the transcript, which needs
+one thing the rest of the dashboard doesn't: this server actually fetching from
+Slack. Every attachment lives behind `files.slack.com`, which serves nothing
+without an `Authorization` header — so a browser can't load one and must not be
+handed a token to try.
+
+- **Metadata is free.** `scripts/probe.js` already receives `files[]` on every
+  `search.messages` match; it records the handful of fields a bubble needs onto
+  the message (`lib/slack.js`). No extra API call, ever.
+- **Bytes go through `GET /api/slack/file?run=…&id=…`**, which attaches the
+  token here and streams the response back. Addressed by file id rather than by
+  URL, so it can only ever fetch something a message in that chat recorded —
+  not an open proxy with a workspace credential on it. Range requests pass
+  through, so seeking a 5-minute recording doesn't re-pull the file.
+- **Needs `files:read`** on the user token, alongside `search:read`. Without it
+  Slack answers with a *redirect to the login page* rather than an error; the
+  card in the chat says so instead of showing a broken-image glyph, and the
+  "Open in Slack" link still works because your browser is already signed in.
+
+Slack's `search.messages` only returns messages that mention you, so attachments
+are recorded on the mentions themselves — not on every reply in a thread.
 
 ## What the pipeline does
 
@@ -325,7 +421,41 @@ plain-language root cause.
 
 From **`/fetch`**, the delivery half, written to **run to completion**: once it
 opens a PR it requests the Codex review, **polls until it lands** (~5–15 min),
-runs `/resolve` on every thread, and only then replies.
+and runs `/resolve` on every thread.
+
+Then — and this is the part a human doing it by hand always does and a script
+never used to — it **goes back and reads the thread again**. A run takes 20–40
+minutes, the Codex poll alone 5–15, and the thread is live the whole time: a
+correction, a second case, a screenshot, "also can you make it X". Replying to
+the message it read 40 minutes ago would ship a PR the conversation had already
+moved past. So before the reply it diffs the thread against the high-water `ts`
+it recorded at the start, discards its own footprint (the `@Linear` command and
+the bot's answer) and the usual `+1`s, and for whatever is left decides
+*already covered / needs code / a question / out of scope*. Anything needing
+code is built onto the **same branch and the same PR** — never a second PR or a
+second ticket — and then:
+
+- **Codex is re-requested only if the follow-up work is genuinely big** (a new
+  module, a new endpoint, a migration, an auth change, a rewrite of what Codex
+  already read). A copy tweak or a bounded conditional does not buy another
+  25-minute poll to be told nothing.
+- **The Linear description and the PR description are both updated** — amended,
+  not replaced, and with both **titles left frozen** (§7's rule survives
+  `/resolve`, rebases and this step alike).
+- Then it sweeps **again**, because fixing the follow-up took time too. Capped
+  at three; past that it says in the reply that the thread is moving faster than
+  the run can follow and hands it back.
+
+A follow-up cannot authorise work the original mention couldn't: the
+`TARGET_SCOPE` scope guard and the build-or-plan split still apply, so a
+follow-up needing a schema change gets written up in the reply as needing a
+steer rather than built at 2am. It shows in the dashboard as the **Follow-ups**
+stage (`sweep`), and the Slack reply says both what the follow-ups changed and
+what they deliberately didn't.
+
+Follow-ups that arrive *after* the run ends are unchanged: the poller files them
+into the same chat with an unread dot and never starts a second pipeline — you
+pick those up from the composer, which resumes the same session.
 
 It keeps `/fetch`'s **plan-mode escape hatch** with one redesign: plan mode waits
 for an approval nobody is present to give, so here the **plan replaces the
@@ -405,6 +535,24 @@ call, and the fastest place to fix it.
   on: a memory for a rare case is *supposed* to sit unread until the case shows
   up. The scan is incremental — a couple of seconds cold over ~500 sessions, a
   few milliseconds after.
+- **New** is one text box, not a form. Say the thing however you'd say it out
+  loud; a **read-only** Claude session (`--permission-mode plan`, with
+  `--add-dir` onto the memory folder) reads `MEMORY.md` and the memories behind
+  it, then decides whether this ground is already remembered. Overlap becomes an
+  **amendment** to the existing file — the whole file, rewritten to fold the new
+  point in — and only genuinely new ground becomes a new memory. It comes back
+  as a proposal, opens in the editor, and is written by the same validated path
+  as everything else, so drafting can never itself touch `~/.claude`.
+
+  That judgement is the part a form can't do. Naming and sectioning are easy;
+  *"does one of these nineteen already say this?"* requires reading them, and
+  twenty near-duplicates are worse than none because the index is loaded into
+  every session and nothing dedupes it.
+
+  The draft is returned as a one-line JSON decision plus the file between
+  `<<<MEMORY` markers — not as JSON containing the file. A memory is multi-line
+  prose full of quotes and backticks, and asking a model to escape all of that
+  into a JSON string fails on the first apostrophe in the wrong place.
 - **Drift is reported at the top.** A memory the index has stopped listing is
   still on disk and still good, but nothing loads it — and its read count then
   stays at zero forever, which makes it look like exactly the dead weight it
@@ -484,6 +632,12 @@ with identical content, 14 of them byte-for-byte.
 - **The app that issues it has no bot scopes**, so no bot user exists, nothing
   joins any channel, and the token grants no visibility you don't already have.
   Revoke it from the same **OAuth & Permissions** page that minted it.
+- **`/api/slack/file` is the one route that fetches with the token**, and it
+  takes a file id rather than a URL — it can only resolve to something a message
+  in that chat already recorded. What comes back is served with the type *we*
+  recorded, `nosniff`, `default-src 'none'; sandbox`, and `Content-Disposition:
+  attachment` for anything that isn't plainly image/video/audio: attachments are
+  bytes a colleague chose, and this origin is one that can start a session.
 - **The server binds `127.0.0.1` only** and refuses cross-origin mutations — a
   POST here can start a session with `--dangerously-skip-permissions`, so a
   loopback `Host` *and* a same-origin `Origin` are both required.

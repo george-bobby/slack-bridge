@@ -1,6 +1,6 @@
 ---
 name: slack-fetch-pipeline
-description: Self-contained headless workflow for one actionable Slack @mention of {{SLACK_USER_NAME}}, dispatched by /scan-mentions (usually inside a subagent). It does NOT call /fetch or /root — it embodies their concepts adapted for unattended execution, and runs end-to-end to completion: Slack/Linear context -> root-cause with a true/false-positive verdict (read-only prod DB, Modal/Datadog logs, regression-suspect PRs) -> file a Linear ticket by posting the one-line @Linear command in the thread and harvesting the issue URL -> build from that issue (or, when the work is too big to start blind, write up a plan and hand it back instead) -> verify -> PR -> request Codex review -> POLL until the review lands -> /resolve -> reply. Gated by a toggles object. Invoked as "/slack-fetch-pipeline {json}" by the poller — never manually.
+description: Self-contained headless workflow for one actionable Slack @mention of {{SLACK_USER_NAME}}, dispatched by /scan-mentions (usually inside a subagent). It does NOT call /fetch or /root — it embodies their concepts adapted for unattended execution, and runs end-to-end to completion: Slack/Linear context -> root-cause with a true/false-positive verdict (read-only prod DB, Modal/Datadog logs, regression-suspect PRs) -> file a Linear ticket by posting the one-line @Linear command in the thread and harvesting the issue URL -> build from that issue (or, when the work is too big to start blind, write up a plan and hand it back instead) -> verify -> PR -> request Codex review -> POLL until the review lands -> /resolve -> sweep the thread for follow-ups posted while it worked and fold them into the same PR (re-reviewing only if big, then updating the Linear and PR descriptions) -> reply. Gated by a toggles object. Invoked as "/slack-fetch-pipeline {json}" by the poller — never manually.
 ---
 
 # slack-fetch-pipeline
@@ -33,7 +33,9 @@ Your argument is JSON:
 
 `toggles` is fixed for this run. **Two rules above all others:** never mutate
 prod (guardrails below), and once you open a PR, finish the job — carry it
-through the Codex review poll and `/resolve` (§8). Do not end at PR-open.
+through the Codex review poll and `/resolve` (§8), *then* back to the thread to
+pick up whatever landed there while you worked (§8.5). Do not end at PR-open,
+and do not end at review-resolved.
 
 ## MCP tools are deferred — load the schema before you call one
 Every `mcp__*` tool this run needs (Slack, Linear, Modal, Datadog) starts
@@ -59,12 +61,18 @@ ToolSearch and seen it come back empty.
   dump secrets or PII into output, the PR, or the Slack reply.
 - **Fixes ship as a PR, never as a direct prod change.** No hotfixing prod state
   to "resolve" a report.
+- **PR title is exactly `<TICKET-KEY>: <Linear ticket title verbatim>`** — e.g.
+  `{{LINEAR_ISSUE_PREFIX}}-386: Require reviewers who disagree to update the
+  verdict`. Never your own wording when a ticket exists, never edited after the
+  PR is open. Full rules in §7.
 - Unlike `/root` (investigate-only), this pipeline *is* authorized to write code,
   open PRs, and post to Slack/Linear — but only as its toggles allow. The
   read-only prod rule carries over absolutely.
 
 ## 0. Track it — and don't stop until it's done
-Open a `TodoWrite` checklist mirroring §1–§9 and drive it to completion. The run
+Open a `TodoWrite` checklist mirroring §1–§9 — **including the §8.5 follow-up
+sweep**, which is the item most easily lost once a PR is open — and drive it to
+completion. The run
 is only over when every *applicable* item in **Done when** (bottom) is checked.
 
 ### 0a. Narrate each stage to the dashboard
@@ -89,6 +97,7 @@ it isn't there). Phases, in order — **use these exact strings**:
 | `pr` | §7 opened | `Opened #4244` + `prUrl=<url>` |
 | `review` | §8 review requested | `Requested Codex review — polling` |
 | `resolve` | §8 threads worked | `3 threads: 1 fixed, 2 false positives` |
+| `sweep` | §8.5 thread re-read | `2 follow-ups: 1 needed code — PR + {{LINEAR_ISSUE_PREFIX}}-375 updated` |
 | `reply` | §9 posted | `Replied in thread` |
 
 Extra fields go on as `key=value` args (`prUrl=`, `linearUrl=`). This is
@@ -119,6 +128,10 @@ thread is about anything else (another area, another app, another repo),
 - **Extract and write down:** the symptom/claim, who reported it, the timestamp
   (→ your DB/log query window), affected org/user/entity IDs, error strings, and
   any links (Linear, Modal, dashboards).
+- **Also write down the `ts` of the newest message in the thread right now.**
+  That single string is the line between what you already knew and what arrives
+  while you work; §8.5 needs it to tell a follow-up from a message you have
+  already read, and there is no way to recover it later.
 - **Linear (only if associated):** follow a Linear link in the thread, else one
   quick `list_issues` search by key terms. Found → `get_issue` + `list_comments`
   (note status + prior findings; it may be a dup or already diagnosed), and
@@ -364,9 +377,34 @@ a PR you haven't seen work.
 ## 7. Open the PR
 - `gh`/push use the **{{GITHUB_LOGIN}}** account (`gh auth switch -u
   {{GITHUB_LOGIN}}` if a push/edit 404s).
-- Commit from the worktree. Title = the §3.5 ticket name
-  (`{{LINEAR_ISSUE_PREFIX}}-NNN: …`), or a concise ≤10-word title if there's no
-  ticket.
+- Commit from the worktree. Commit title = the PR title (below).
+- **PR title = `<TICKET-KEY>: <Linear ticket title copied verbatim>`.** Nothing
+  else. Example, for `{{LINEAR_ISSUE_PREFIX}}-386`:
+
+  ```
+  {{LINEAR_ISSUE_PREFIX}}-386: Require reviewers who disagree to update the verdict
+  ```
+
+  Rules, no exceptions:
+  - The key prefix (`{{LINEAR_ISSUE_PREFIX}}-386:`) is **required** — take it
+    from the §3.5 issue.
+  - Everything after `: ` is the ticket title **character for character** as
+    `get_issue` returned it. Copy-paste it; do not retype it from memory.
+  - **No** paraphrase, rewording, shortening, expanding, re-casing,
+    re-punctuating, summarizing the diff, or appending anything (no
+    `(fix)`, no file names, no `— part 2`, no emoji).
+  - Never "improve" a title you think is vague. If it's genuinely wrong, rename
+    the issue in Linear first (`save_issue`), then copy the **new** title across.
+  - Once opened, the title is frozen — later pushes, `/resolve`, and rebases must
+    not edit it. The only reason to run `gh pr edit --title` is to restore it to
+    `<KEY>: <ticket title verbatim>` after a drift.
+  - Only a PR with **no ticket at all** gets a title you write yourself
+    (≤10 words, no key).
+  - Detail — per-change breakdown, measurements, file list — goes in the
+    description, never the title.
+
+  Before opening: put the `get_issue` title and your PR title side by side and
+  confirm they match exactly. If they don't, fix the PR title, not the ticket.
 - Description = the **root cause** (the mechanism + the evidence behind it), a
   link to the §3.5 Linear issue, real **"How to test from the UI"** steps, a
   **direct link to the exact page/problem**, and every test you ran, marked ✅.
@@ -391,7 +429,135 @@ Find the PR (`gh pr view --json number,url,assignees`), then:
    **If `toggles.codexReplies` is false:** stop after step 1 (assigned only). No
    review request, no `/resolve`.
 
-## 8.5 Propose a memory — usually don't (`toggles.saveToMemory`)
+Then go to §8.5 — the PR being open and reviewed is not the end of the run.
+
+## 8.5 Sweep the thread for follow-ups — the job isn't over when the PR is
+
+You have been working for 20–40 minutes: root-cause, ticket, build, verify, PR,
+and a Codex poll that alone runs 5–15. **The thread stayed live that whole
+time.** Somebody has very often added to it — the reporter remembering a second
+case, a colleague posting a screenshot of the same bug elsewhere, "also can you
+make it X while you're in there", or a correction that changes what the fix
+should be. Replying now to the message you read 40 minutes ago ships a PR that
+answers a question the thread has already moved past.
+
+So before you reply, go back and read it again.
+
+**This section runs only on a path that opened a PR.** A false positive (§2), an
+already-built finding (§3), a plan instead of a build (§4a) or an out-of-scope
+thread has shipped nothing to amend, and its §9 reply is the *first* thing the
+thread hears from you — those go straight to §8.7.
+
+### 8.5a Re-read the thread, and diff it against what you already knew
+
+`slack_read_thread(channel, thread_ts)` again — the whole thing, fresh. A
+follow-up is any message whose `ts` is **newer than the newest message you
+recorded in §1**, minus the ones you and the tooling put there yourselves.
+
+Discard as noise without further thought:
+- **your own §3.5b command and @Linear's reply to it**
+  (`{{LINEAR_BOT_USER_ID}}`) — that exchange is this run's own footprint, not a
+  follow-up,
+- build/deploy/CI bots, and GitHub's unfurl of the PR you just opened,
+- `+1`, `thanks`, `nice one`, an emoji-only or reaction-only reply,
+- anything {{SLACK_USER_NAME}} posted (you are them).
+
+**Analyze every new image with `slack_read_file`,** exactly as §1 does. A
+screenshot posted mid-run is primary evidence and routinely contradicts the
+prose above it — the follow-up that matters most is usually a picture.
+
+Nothing real left → emit `sweep` with `No follow-ups` and go to §8.7. **This is
+the common case, and it costs one Slack call.**
+
+### 8.5b Decide what each follow-up actually is
+
+Judge it against **the diff you shipped**, not against the original report — so
+re-read your own work first (`gh pr diff <n>`). "It doesn't cover X" is only
+true if X really isn't in there. Then put each follow-up in exactly one bucket:
+
+| bucket | what it looks like | what you do |
+|---|---|---|
+| **Already covered** | restates the ask, adds detail you handled, confirms the symptom | No code. Fold the extra evidence into §8.5e's descriptions if it sharpens them. |
+| **Needs code** | a correction to the spec, a case the fix misses, a second symptom of the *same* mechanism, a small addition on the same surface | §8.5c |
+| **A question** | "will this fix Y too?", "when does it ship?" | No code. Answer it in the §9 reply. |
+| **Out of scope** | a different bug, a different area, anything outside `{{TARGET_SCOPE}}`, or work that trips §4's "big" test on its own | **Do not build it and do not widen the PR.** Name it in the §9 reply as not covered, so it can come back as its own mention. |
+
+The scope guard and the §4 build-or-plan split apply here in full: **a follow-up
+cannot authorise work the original mention couldn't.** One that needs a schema
+change, an auth change or a real design choice gets written up in the §9 reply
+as needing a steer — exactly like §4a — not built unattended.
+
+### 8.5c Make the changes — same branch, same PR
+
+Never a second PR, never a second Linear ticket. Work in the **same worktree and
+branch** as §5, under §5's rules (fix the mechanism, no drive-by fixes, lint
+before commit), verify as §6 — **watch it behave; a follow-up fix is not exempt
+from that** — then commit and push to the open PR.
+
+`/resolve` rebased and force-pushed in §8, so rebase again if `main` has moved
+since, and keep using `--force-with-lease`.
+
+### 8.5d Re-review, or not — the size test
+
+`toggles.codexReplies` false → never re-request, whatever the size. Otherwise:
+
+- **Small → no second review.** Copy, labels, styling, a bounded conditional, an
+  added test, a rename — changes inside files Codex read ten minutes ago.
+  Re-requesting buys another 5–25 minutes of polling to be told nothing.
+- **Big → re-request, and see it through.** A new file or module, a new
+  route/endpoint/query, a migration or schema touch, an auth or permission
+  change, a rewrite of the approach Codex reviewed, or a diff on the order of
+  the original one. Repeat §8 step 2 **in full**: `gh pr comment <n> --body
+  "@codex review"`, **poll until it lands** (Monitor, ~60s cadence, ~25 min
+  cap), then run `/resolve` again. Re-emit `review` and `resolve`.
+- **Borderline → ask whether a reviewer reading only the new commits would have
+  anything to say about correctness.** Yes → re-review. The asymmetry is
+  deliberate: a skipped review on a real change ships a bug; a wasted review on
+  a copy tweak costs only time.
+
+Do **not** re-run `gh pr edit <n> --add-reviewer codex` — Codex is already on the
+PR, and the comment is what re-triggers a pass.
+
+### 8.5e Update the Linear ticket and the PR description
+
+**If §8.5c changed anything, do both.** This is how the follow-up stops living
+only in Slack, and it is the step most likely to be forgotten.
+
+- **Linear** — only if §3.5 filed an issue (you hold a `linearKey`). `get_issue`
+  first, then `save_issue` with the description **amended, never replaced**:
+  keep the bot's original body verbatim and append
+
+  ```
+  ## Follow-ups from the thread
+  - <what was asked, who asked, and what changed as a result>
+  ```
+
+  **Never touch the issue title.** §7 froze the PR title to it character for
+  character; renaming it now silently breaks that match.
+
+- **PR description** — `gh pr edit <n> --body "…"`. Keep the root cause and the
+  existing "How to test from the UI" steps, add the follow-up work under those
+  same headings, and extend the ✅ test list with everything you re-ran in
+  §8.5c. **Never touch the PR title** — §7 froze it, and that survives
+  `/resolve`, rebases and this section alike.
+
+Then emit the stage:
+
+```bash
+{{PROJECT_DIR}}/scripts/emit.sh "<runId>" sweep "2 follow-ups: 1 needed code — PR + {{LINEAR_ISSUE_PREFIX}}-375 updated, no re-review"
+```
+
+### 8.5f Then look once more
+
+Fixing a follow-up takes time, and the thread stayed live through that too. Go
+back to §8.5a and read it again.
+
+**Stop as soon as a sweep finds nothing new, and never run more than three.** If
+a fourth would be needed, stop anyway and say so in §9: the thread is moving
+faster than the run can follow, and the rest is {{SLACK_USER_NAME}}'s to pick up
+from the dashboard composer.
+
+## 8.7 Propose a memory — usually don't (`toggles.saveToMemory`)
 
 **`false` → skip this section entirely.**
 
@@ -447,7 +613,12 @@ the approved set; this step only ever adds to `data/runs/memories/`.
   - the **verdict** (confirmed bug / not a bug / already exists / needs planning),
   - the **root cause in plain language** — no jargon, no assumed context,
   - the PR link (if opened) and Linear link (if created),
-  - whether Codex review + `/resolve` ran.
+  - whether Codex review + `/resolve` ran,
+  - **what the follow-ups changed (§8.5)** — one line, and only if there were
+    any: what you picked up from the thread and folded into the same PR, plus
+    anything you deliberately left out because it was a separate job. Answer any
+    follow-up *question* here too. If a follow-up needs a steer rather than a
+    fix, say that plainly. Never claim to have handled something you skipped.
 
   If you stopped early, say so plainly and explain why. **Never paste secrets,
   PII, or raw prod rows.** Use the markdown the `slack_send_message` tool
@@ -468,9 +639,12 @@ Use `"action":"skipped"` (with the reason in `outcome`) for false positive /
 already built / planned-not-built / out of scope; `"action":"error"` on a
 failure. For a §4a plan, `outcome` names the verdict and says a plan is waiting
 — e.g. `Confirmed, but needs a schema change — plan written up, needs a steer`.
+If §8.5 folded follow-ups in, `outcome` says so in its one line — e.g.
+`Fixed the unbounded metadata width; picked up 1 follow-up from the thread`.
 
 ## Done when (do not return until every applicable box is checked)
-- [ ] Whole thread read; **every screenshot analyzed as primary evidence** (§1)
+- [ ] Whole thread read; **every screenshot analyzed as primary evidence**, and
+      the newest message's `ts` written down as §8.5's boundary (§1)
 - [ ] Bug report → mechanism grounded in real `{{TARGET_SCOPE}}` code, recent
       merged PRs checked as regression suspects, claim confirmed or refuted
       against prod data **read-only**, and a true/false-positive verdict
@@ -486,10 +660,19 @@ failure. For a §4a plan, `outcome` names the verdict and says a plan is waiting
       and never a bare "this needs planning" with no plan behind it.
 - [ ] Worked in a worktree; fixed the **mechanism**, not the symptom
 - [ ] Change verified working before the PR was opened
+- [ ] PR title is `<TICKET-KEY>: <ticket title verbatim>` — diffed against
+      `get_issue`, character for character, and not edited since (§7)
 - [ ] PR carries the root cause + UI test steps + a direct problem/page link
 - [ ] `codexReplies` true → review requested, **polled until it landed**, and
       `/resolve` completed every P1/P2 thread
-- [ ] Reply posted per `reply` (or intentional silence) — plain-language, no PII
+- [ ] PR opened → the thread was **re-read after the review resolved** (§8.5),
+      new messages diffed against the §1 high-water `ts`, and new screenshots
+      analyzed. Follow-ups needing code were built onto the **same branch and
+      PR** — never a second PR or ticket — re-reviewed only if genuinely big
+      (§8.5d), and the **Linear description and PR description both updated**
+      (§8.5e) with the titles left untouched. Swept again after fixing, up to 3.
+- [ ] Reply posted per `reply` (or intentional silence) — plain-language, no PII,
+      and it says what the follow-ups changed and what they didn't
 - [ ] **Nothing mutated in prod** — no writes, no hotfixes
 
 ## Security note
