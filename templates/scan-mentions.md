@@ -162,7 +162,6 @@ Build the argument JSON from the mention + the current toggles:
   "toggles": {
     "createLinearIssue": <config.createLinearIssue>,
     "codexReplies": <config.codexReplies>,
-    "saveToMemory": <config.saveToMemory>,
     "reply": <config.reply>
   }
 }

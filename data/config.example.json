@@ -9,9 +9,8 @@
 
   "createLinearIssue": false,
   "codexReplies": true,
-  "saveToMemory": true,
   "reply": true,
-  "_toggles": "Passed through to the pipeline. createLinearIssue: post the one-line @Linear command in the thread and build from the returned issue. codexReplies: after the PR opens, request a Codex review, poll until it lands, run /resolve. saveToMemory: let the run bank lessons via /addmem. reply: post the verdict back in the Slack thread.",
+  "_toggles": "Passed through to the pipeline. createLinearIssue: post the one-line @Linear command in the thread and build from the returned issue. codexReplies: after the PR opens, request a Codex review, poll until it lands, run /resolve. reply: post the verdict back in the Slack thread.",
 
   "poller": {
     "intervalSec": 300,

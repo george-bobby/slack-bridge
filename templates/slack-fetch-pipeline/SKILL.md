@@ -1,6 +1,6 @@
 ---
 name: slack-fetch-pipeline
-description: Self-contained headless workflow for one actionable Slack @mention of {{SLACK_USER_NAME}}, dispatched by /scan-mentions (usually inside a subagent). It does NOT call /fetch or /root — it embodies their concepts adapted for unattended execution, and runs end-to-end to completion: Slack/Linear context -> root-cause with a true/false-positive verdict (read-only prod DB, Modal/Datadog logs, regression-suspect PRs) -> file a Linear ticket by posting the one-line @Linear command in the thread and harvesting the issue URL -> build from that issue (or, when the work is too big to start blind, write up a plan and hand it back instead) -> verify -> PR -> request Codex review -> POLL until the review lands -> /resolve -> memory -> reply. Gated by a toggles object. Invoked as "/slack-fetch-pipeline {json}" by the poller — never manually.
+description: Self-contained headless workflow for one actionable Slack @mention of {{SLACK_USER_NAME}}, dispatched by /scan-mentions (usually inside a subagent). It does NOT call /fetch or /root — it embodies their concepts adapted for unattended execution, and runs end-to-end to completion: Slack/Linear context -> root-cause with a true/false-positive verdict (read-only prod DB, Modal/Datadog logs, regression-suspect PRs) -> file a Linear ticket by posting the one-line @Linear command in the thread and harvesting the issue URL -> build from that issue (or, when the work is too big to start blind, write up a plan and hand it back instead) -> verify -> PR -> request Codex review -> POLL until the review lands -> /resolve -> reply. Gated by a toggles object. Invoked as "/slack-fetch-pipeline {json}" by the poller — never manually.
 ---
 
 # slack-fetch-pipeline
@@ -26,7 +26,6 @@ Your argument is JSON:
   "toggles": {
     "createLinearIssue": false,
     "codexReplies": true,
-    "saveToMemory": true,
     "reply": true
   }
 }
@@ -90,7 +89,6 @@ it isn't there). Phases, in order — **use these exact strings**:
 | `pr` | §7 opened | `Opened #4244` + `prUrl=<url>` |
 | `review` | §8 review requested | `Requested Codex review — polling` |
 | `resolve` | §8 threads worked | `3 threads: 1 fixed, 2 false positives` |
-| `memory` | §8 memory banked | `Banked the metadata-width lesson` |
 | `reply` | §9 posted | `Replied in thread` |
 
 Extra fields go on as `key=value` args (`prUrl=`, `linearUrl=`). This is
@@ -388,18 +386,10 @@ Find the PR (`gh pr view --json number,url,assignees`), then:
       return before this resolves.** If it times out, note "Codex did not
       respond in time" and still run step (c) on whatever exists.
    c. **Resolve:** run `/resolve` on this PR — it triages/fixes/replies/resolves
-      every Codex thread, commits + pushes, and does the final rebase. Let its
-      auto-chained `/addmem` run **iff** `toggles.saveToMemory`.
+      every Codex thread, commits + pushes, and does the final rebase.
 
    **If `toggles.codexReplies` is false:** stop after step 1 (assigned only). No
    review request, no `/resolve`.
-
-3. **Memory:**
-   - `saveToMemory` true + Codex ran → `/resolve`'s `/addmem` already covered it.
-   - `saveToMemory` true + Codex skipped → run `/addmem` yourself over anything
-     durable/non-obvious this run surfaced.
-   - `saveToMemory` false → never invoke `/addmem`, even if `/resolve` would
-     chain it — suppress that step.
 
 ## 9. Final Slack reply (`toggles.reply`)
 - **false** → post nothing; stop silently (requester follows GitHub/Linear).
@@ -452,7 +442,6 @@ failure. For a §4a plan, `outcome` names the verdict and says a plan is waiting
 - [ ] PR carries the root cause + UI test steps + a direct problem/page link
 - [ ] `codexReplies` true → review requested, **polled until it landed**, and
       `/resolve` completed every P1/P2 thread
-- [ ] Memory handled per `saveToMemory`
 - [ ] Reply posted per `reply` (or intentional silence) — plain-language, no PII
 - [ ] **Nothing mutated in prod** — no writes, no hotfixes
 

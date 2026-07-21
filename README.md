@@ -467,7 +467,6 @@ gate that only spins up Claude when the search returns something new.
 | `reply` | `true` | post the verdict + PR/Linear links back in the thread |
 | `createLinearIssue` | `false` | after the verdict, post `@Linear create an issue, …` in the thread and build from the returned issue; off = thread is the spec — see [Filing the Linear ticket](#filing-the-linear-ticket) |
 | `codexReplies` | `true` | after PR opens, request Codex review + poll + run `/resolve`; off = stop at PR open |
-| `saveToMemory` | `true` | let the run bank durable lessons via `/addmem` |
 
 Flip them in the dashboard (writes `data/config.json` instantly) or edit the file —
 the poller reads current values at the start of every tick.
@@ -533,9 +532,9 @@ Two things worth knowing:
 The pipeline calls into things that are part of your wider setup, not this
 project — they stay where they are:
 
-- **`/resolve` and `/addmem`** — your existing personal commands in
-  `~/.claude/commands/`. The pipeline calls them by name after a PR opens; if
-  you don't have them, turn `codexReplies` and `saveToMemory` off.
+- **`/resolve`** — your existing personal command in `~/.claude/commands/`.
+  The pipeline calls it by name after a PR opens; if you don't have it, turn
+  `codexReplies` off.
 - **MCP connectors** — claude.ai Slack + Linear (required), plus `mcp-modal` /
   Datadog / PostHog for log digging, and the GitHub MCP / `gh` CLI for PRs.
 - **Your repo** — `TARGET_REPO` / `TARGET_SCOPE` is what the pipeline builds
