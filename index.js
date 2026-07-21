@@ -32,6 +32,8 @@ const { execFile } = require("child_process");
 const env = require("./lib/env");
 const store = require("./lib/store");
 const jobs = require("./lib/jobs");
+const memory = require("./lib/memory");
+const proposals = require("./lib/proposals");
 const bus = require("./lib/bus");
 
 const ROOT = __dirname;
@@ -105,7 +107,11 @@ const MIME = {
   ".html": "text/html; charset=utf-8",
   ".css": "text/css; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  // The vendored editor is an ES module, and a browser refuses to run one
+  // served as anything but a JavaScript type.
+  ".mjs": "text/javascript; charset=utf-8",
   ".svg": "image/svg+xml",
+  ".png": "image/png",
   ".json": "application/json",
 };
 
@@ -200,6 +206,23 @@ function snapshot() {
 
 /* ----------------------------------------------------------------- routes */
 
+/**
+ * The body of a proposed memory, which a run hands over by path.
+ *
+ * Confined to `data/runs/memories/`: this endpoint takes an unauthenticated
+ * local POST, and "read me any file and store it" is a much larger door than a
+ * narration route needs. Resolved and then re-checked, the same two-step
+ * lib/memory.js uses — the pattern test rejects the obvious traversal, the
+ * containment test is what still holds if the pattern is ever loosened.
+ */
+function readProposalText(textFile) {
+  if (!textFile) return "";
+  const file = path.resolve(proposals.DIR, String(textFile));
+  if (path.dirname(file) !== path.resolve(proposals.DIR)) throw new Error("proposal text must live in data/runs/memories/");
+  if (!file.endsWith(".md")) throw new Error("proposal text must be a .md file");
+  return fs.readFileSync(file, "utf8");
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const p = url.pathname;
@@ -230,6 +253,81 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && p === "/api/dirs") {
     try {
       sendJson(res, 200, { ok: true, ...listDirs(url.searchParams.get("path")) });
+    } catch (e) {
+      sendJson(res, 400, { ok: false, error: String(e.message || e) });
+    }
+    return;
+  }
+
+  // --- project memory ------------------------------------------------------
+  // What Claude Code was told about the repo a job runs in: `MEMORY.md` and the
+  // one-fact-per-file memories beside it. The workdir is resolved through the
+  // same jobs.resolveWorkdir() a job would use — pass a chat's id and you get
+  // that chat's repo, pass nothing and you get the default one — so the panel
+  // can never show the memory of a repo the run wouldn't have read.
+  if (p === "/api/memory" || p.startsWith("/api/memory/")) {
+    try {
+      const body =
+        req.method === "POST" ? JSON.parse((await readBody(req)) || "{}") : Object.fromEntries(url.searchParams);
+      const runId = store.safeId(String(body.runId || ""));
+      const workdir = jobs.resolveWorkdir(store.readConfig(), runId ? store.loadRun(runId) : null);
+      const verb = p.slice("/api/memory".length);
+      const ok = (extra) => sendJson(res, 200, { ok: true, workdir, ...extra });
+
+      // A proposal names the run it came from, and that run names the repo.
+      // Resolving the workdir from it rather than trusting the one recorded on
+      // the proposal keeps every route here answering about the same directory.
+      const forProposal = (id) => {
+        const rec = proposals.get(id);
+        if (!rec) throw new Error(`no such proposal: ${id}`);
+        const run = store.safeId(rec.runId) ? store.loadRun(rec.runId) : null;
+        return { rec, dir: jobs.resolveWorkdir(store.readConfig(), run) };
+      };
+
+      if (req.method === "GET" && verb === "") {
+        ok(memory.list(workdir));
+      } else if (req.method === "GET" && verb === "/file") {
+        ok(memory.read(workdir, body.name));
+      } else if (req.method === "GET" && verb === "/proposals") {
+        // Grouped by territory, with the live memory names so an amendment to
+        // something that already exists is marked ripe without a second run.
+        const live = memory.list(workdir, { usage: false }).files.map((f) => f.name);
+        ok({ territories: proposals.territories(live), all: proposals.all() });
+      } else if (req.method === "POST" && verb === "/file") {
+        ok(memory.write(workdir, body.name, body.text));
+      } else if (req.method === "POST" && verb === "/approve") {
+        // The one place a proposal becomes a memory. `update` carries the whole
+        // amended file rather than a patch, which is what the editor showed you
+        // before you pressed the button.
+        const { rec, dir } = forProposal(body.id);
+        const wrote =
+          rec.verdict === "update"
+            ? memory.write(dir, rec.target, body.text || rec.text)
+            : memory.create(dir, rec.name, body.text || rec.text, { title: rec.title, section: rec.section });
+        // Every proposal for this ground, not just the one on screen — the
+        // memory just written is what all of them were arguing for.
+        proposals.setStatus(rec.runId, "approved");
+        proposals.resolveTerritory(rec.territory, "approved");
+        // `dir`, not the request's workdir: a proposal is approved from
+        // wherever the panel happens to be pointed, and reporting the caller's
+        // repo for a write that landed in the run's would be a lie the UI
+        // then repeats.
+        sendJson(res, 200, { ok: true, workdir: dir, ...wrote, verdict: rec.verdict });
+      } else if (req.method === "POST" && verb === "/discard") {
+        // The row you pressed this on is a territory, not a single proposal, so
+        // discarding it drops the whole case rather than one run's half of it.
+        const rec = proposals.setStatus(String(body.id || ""), "discarded");
+        proposals.resolveTerritory(rec.territory, "discarded");
+        ok(rec);
+      } else if (req.method === "POST" && verb === "/archive") {
+        ok(memory.archive(workdir, body.name));
+      } else if (req.method === "POST" && verb === "/restore") {
+        ok(memory.restore(workdir, body.name));
+      } else if (req.method === "POST" && verb === "/relist") {
+        ok(memory.relist(workdir, body.name, { section: body.section }));
+      } else {
+        sendJson(res, 404, { ok: false, error: `no memory route for ${req.method} ${p}` });
+      }
     } catch (e) {
       sendJson(res, 400, { ok: false, error: String(e.message || e) });
     }
@@ -286,6 +384,35 @@ const server = http.createServer(async (req, res) => {
           if (body[k]) run[k] = body[k];
         }
         const phase = String(body.phase || "step");
+
+        // A `memory` event is a *proposal*, never a memory: it lands in
+        // data/runs/memories/, which no session loads, and is promoted only by
+        // recurrence or by you (see lib/proposals.js §8.5 of the skill). Filed
+        // through the narration route on purpose — emit.sh stays the single way
+        // a headless run talks to the dashboard, and a proposal that fails to
+        // parse must not cost the run its stage line.
+        if (phase === "memory") {
+          try {
+            proposals.propose(id, {
+              verdict: body.verdict,
+              territory: body.territory,
+              reason: String(body.detail || body.text || ""),
+              citation: body.citation,
+              target: body.target,
+              name: body.name,
+              title: body.title,
+              section: body.section,
+              workdir: jobs.resolveWorkdir(store.readConfig(), run),
+              // The memory itself is passed by path, since it is a whole file
+              // and `text` is already this event's one-line summary. Confined
+              // to the proposals directory so a POST here cannot read the disk.
+              text: readProposalText(body.textFile),
+            });
+          } catch (e) {
+            store.appendMessage(run, { role: "event", phase, text: `memory proposal rejected: ${e.message}` });
+          }
+        }
+
         const msg = store.appendMessage(run, {
           role: body.role === "outcome" ? "outcome" : "event",
           phase,

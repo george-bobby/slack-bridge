@@ -391,6 +391,53 @@ Find the PR (`gh pr view --json number,url,assignees`), then:
    **If `toggles.codexReplies` is false:** stop after step 1 (assigned only). No
    review request, no `/resolve`.
 
+## 8.5 Propose a memory — usually don't (`toggles.saveToMemory`)
+
+**`false` → skip this section entirely.**
+
+You are not writing a memory. You are filing a **proposal**, which nothing loads
+and which costs nothing to be wrong about. It is promoted only when a *second*
+run proposes the same ground, or when George approves it in the dashboard.
+
+**The default answer is nothing, and that is a success.** Most runs end here with
+a `skip`. The predecessor of this step banked something after every PR and
+rotted the context it was supposed to improve: a memory is read into *every*
+future session, so a fact that mattered once is a permanent tax.
+
+**The bar — all four, or it's a `skip`:**
+1. **It generalises.** It changes what you'd do on a *different* file, a
+   *different* ticket, next month. "PR #4281 needed `invalidatesTags`" is a fact
+   about a PR; "a new mutation's cache-tag entry is hand-written and no tool
+   catches its absence" is a rule. Only the second qualifies.
+2. **It isn't in the repo.** If `CLAUDE.md`, a README or the code says it, the
+   memory is a stale duplicate waiting to happen.
+3. **It isn't already remembered.** Read `MEMORY.md` in the run's repo *first*
+   and check the existing memories. Overlap means `update`, never `create`.
+4. **It was non-obvious.** Something that cost this run time, or that a reviewer
+   had to point out. Not a restatement of the task.
+
+**Then emit exactly one proposal**, with `territory` naming the *ground* rather
+than the incident — `cache-invalidation`, not `pr-4281`. That slug is how a
+second run's proposal is recognised as the same pattern, so keep it short and
+reusable:
+
+```bash
+{{PROJECT_DIR}}/scripts/emit.sh "<runId>" memory "<one line: what and why, or 'nothing durable'>" \
+  verdict=skip|update|create territory=<slug> target=<existing-file.md> \
+  name=<feedback-thing.md> section="<MEMORY.md heading>" citation="<PR or thread URL>"
+```
+
+For `update` and `create`, write the **whole memory file** — frontmatter and all,
+in the house style of the ones already there — to
+`{{PROJECT_DIR}}/data/runs/memories/<runId>.md` first, and pass
+`textFile=<that path>`. An `update` carries the complete amended file, not a
+patch. Frontmatter needs `name`, a `description` that reads like a sentence (it
+is what recall matches on), and `metadata.type` of
+`user | feedback | project | reference`.
+
+**Never write into `~/.claude/projects/*/memory/` yourself.** That directory is
+the approved set; this step only ever adds to `data/runs/memories/`.
+
 ## 9. Final Slack reply (`toggles.reply`)
 - **false** → post nothing; stop silently (requester follows GitHub/Linear).
 - **true** → one message to the originating thread via

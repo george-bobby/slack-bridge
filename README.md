@@ -92,13 +92,16 @@ slack-bridge/
 │   ├── render.js         templates/ + .env  →  .claude/
 │   ├── store.js          config/state/cost + the per-run chat records
 │   ├── jobs.js           spawns follow-ups & manual runs, streams them back
+│   ├── memory.js         reads/writes ~/.claude/projects/<repo>/memory/*.md
 │   └── bus.js            server-sent events (the UI never polls)
 ├── public/               index.html + app.css + app.js
+│   └── vendor/           the Milkdown editor, pinned and committed (see below)
 ├── templates/            the prompts, with {{TOKENS}} where your values go
 │   ├── scan-mentions.md                  the poller
 │   └── slack-fetch-pipeline/SKILL.md     the per-mention workflow
 ├── .claude/              rendered from templates/ by install.sh  (gitignored)
 ├── scripts/
+│   ├── vendor-milkdown.js  re-fetch public/vendor/ (only when bumping the editor)
 │   ├── install.sh        render prompts, symlink into ~/.claude, start/stop both agents
 │   ├── probe.js          free mention detection — the gate that decides a tick's cost
 │   ├── run-once.sh       one headless tick (the cron runner, single-flighted)
@@ -269,6 +272,7 @@ whole point; a skip you can't see is a skip nobody can correct.
 | `reply` | `true` | post the verdict + PR/Linear links back in the thread |
 | `createLinearIssue` | `false` | after the verdict, file a ticket via the @Linear bot and build from it; off = the thread is the spec |
 | `codexReplies` | `true` | after PR opens, request Codex review + poll + run `/resolve`; off = stop at PR open |
+| `saveToMemory` | `true` | let a run **propose** a memory into `data/runs/memories/` — never write one. Recurrence or your approval promotes it; see [Project memory](#project-memory) |
 
 Flip them in the dashboard or edit the file — the poller reads current values at
 the start of every tick.
@@ -372,6 +376,93 @@ Two things worth knowing: this posts to Slack **even when `reply` is off**
 (`reply` governs the final verdict message; this is work tracking), and if the
 bot doesn't answer in 2 minutes the pipeline does **not** re-post — a duplicate
 command means a duplicate ticket.
+
+## Project memory
+
+The 📖 button in the top bar (or `m`) opens the Claude Code memory for the repo a
+job runs in — `~/.claude/projects/<repo>/memory/`, which is `MEMORY.md` plus one
+file per remembered fact. That directory is read into **every** headless run, so
+it is the fastest explanation for why the poller keeps making the same wrong
+call, and the fastest place to fix it.
+
+- **Which repo** is resolved server-side through the same `jobs.resolveWorkdir()`
+  a job uses, so with a chat open you get that chat's repo and otherwise the
+  default `TARGET_REPO`. The panel header names it either way.
+- **Frontmatter is never edited.** The `name` / `description` / `type` block is
+  split off before the editor sees it and restored byte-for-byte on save — a
+  WYSIWYG pass over YAML writes back something the memory loader can't parse.
+  It's shown as the caption above the prose instead, and `type` groups the list.
+- **`[[cross-references]]`** are pulled out under the editor as chips you can
+  follow; one pointing at a memory nobody has written yet is struck through.
+- **Saving only touches files you edited.** The Save button is lit by comparing
+  against the editor's *own* round-trip of the file, not the bytes on disk, so
+  opening a memory never marks it dirty. Writes are `*.md` inside that one
+  directory, and a memory is never unlinked — retiring one moves it to
+  `.archive/`, and Restore brings it back.
+- **Every row says what it has earned.** `lib/memuse.js` counts the `Read` calls
+  on each memory across that repo's session transcripts, so "15 reads, last
+  today" and "never read" are measured, not guessed. It is shown and never acted
+  on: a memory for a rare case is *supposed* to sit unread until the case shows
+  up. The scan is incremental — a couple of seconds cold over ~500 sessions, a
+  few milliseconds after.
+- **Drift is reported at the top.** A memory the index has stopped listing is
+  still on disk and still good, but nothing loads it — and its read count then
+  stays at zero forever, which makes it look like exactly the dead weight it
+  isn't. The banner counts both directions (unlisted files, and index lines with
+  no file); **Restore** re-lists one from its own frontmatter.
+
+`Esc` closes, `⌘S` saves, and closing with unsaved edits asks first.
+
+### Proposals — how a run remembers something (`saveToMemory`)
+
+**A run never writes a memory. It files a proposal.** Writing a memory is cheap,
+local and immediate; *reading* one is charged to every session from then on. A
+step that fires per-run is therefore guaranteed to lose that trade over time —
+which is exactly what the `/addmem` call this replaces did, banking PR-shaped
+detail after every merge until the context it meant to improve was noise.
+
+So a proposal lands in `data/runs/memories/`, which no session ever loads and
+which costs nothing to be wrong about. Two things promote one:
+
+- **Recurrence.** Each proposal names the `territory` it is about —
+  `cache-invalidation`, not `pr-4281`. A *second* proposal in the same territory,
+  from a different run, is the first evidence this is a pattern rather than an
+  anecdote, and the promoted memory carries both citations. That is the shape the
+  good hand-written ones already have: *"Codex P2s on PRs #4086, #4127, #4244"*.
+- **You.** Any proposal can be approved from the panel at any time. Recurrence is
+  the bar for doing it unattended, not a rule about what you may keep.
+
+A proposal nobody promotes expires after 30 days. That is the intended outcome
+for most of them, and it is free. **`skip` is recorded rather than dropped** —
+it's the right answer for most runs, and a skip you can't see is a decision
+nobody can correct, the same reasoning that keeps triage skips in the inbox.
+
+Proposals appear above the memories, marked `ready` once they're ripe. Opening
+one loads it into the same editor — **what you approve is what's in the editor**,
+not what the run wrote, so the wording is yours before it becomes something every
+future session reads. A proposal whose territory matches an existing memory is an
+**amendment**, and is ripe at one sighting: it adds no new index line.
+
+Turn the whole thing off with the **Propose memories** toggle in Settings.
+
+### The vendored editor
+
+`public/vendor/` holds [Milkdown](https://milkdown.dev) (Crepe) as one pinned,
+self-contained ES module. It is committed rather than installed or hot-linked so
+that `node index.js` still works with nothing installed and no network — this
+page can start a session with `--dangerously-skip-permissions`, and it shouldn't
+need a CDN to draw a text box. The 2.7MB of JS is imported on first open only.
+
+Re-fetch it with `node scripts/vendor-milkdown.js` after bumping `VERSION` in
+that script. It fails loudly if upstream starts importing something that isn't
+vendored, or reaches for more of Node's `process` than the stub provides.
+
+Because Milkdown re-serialises the whole document, a save rewrites the file in
+remark's house style. `memNormalize()` in `app.js` puts back the parts that
+would otherwise be damaging — chiefly the `\[\[escaped]]` wiki-links — and
+LaTeX is switched off so `$` stays money. What survives is blank lines between
+blocks; no text is altered. All 19 memory files in the reference repo round-trip
+with identical content, 14 of them byte-for-byte.
 
 ## External dependencies (deliberately not vendored)
 

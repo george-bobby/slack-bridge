@@ -5,13 +5,20 @@
 #   emit.sh <runId> <phase> "<one line>" [key=value ...]
 #
 #   phase: queued | context | root-cause | verdict | linear | plan | build
-#          | verify | pr | review | resolve | reply | done | error
+#          | verify | pr | review | resolve | memory | reply | done | error
 #   keys:  prUrl, linearUrl, action, who, channel, channelId, userId,
 #          permalink, threadTs, message
+#   memory: verdict, territory, target, name, title, section, citation,
+#           textFile  (a *.md filename inside data/runs/memories/)
 #
 # Every phase but `plan` carries a one-line summary. `plan` carries the whole
 # plan document for work too big to build unattended — multi-line markdown is
 # expected there, and the dashboard renders it as such.
+#
+# `memory` files a *proposal*, not a memory: it lands in data/runs/memories/,
+# which no session ever loads, and is promoted into the repo's real memory only
+# by a second run proposing the same `territory` or by an approval in the
+# dashboard. See lib/proposals.js.
 #
 # Example:
 #   emit.sh 1784560120.179279 verdict "True positive — the row wraps at <900px"

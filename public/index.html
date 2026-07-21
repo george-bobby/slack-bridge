@@ -4,6 +4,10 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Slack Bridge</title>
+    <!-- Before app.css so the memory panel's integration rules win. Every
+         selector in it is scoped to .milkdown, so it cannot touch the rest of
+         the page; only the editor's 2.7MB of JS is deferred to first open. -->
+    <link rel="stylesheet" href="/vendor/milkdown.css" />
     <link rel="stylesheet" href="/app.css" />
     <link
       rel="icon"
@@ -47,6 +51,17 @@
           <button role="tab" data-mode="auto" aria-selected="false">Auto</button>
         </div>
 
+        <!-- What Claude Code already knows about the repo a job runs in. It is
+             read into every headless run, so it belongs next to the other
+             things that decide how a run behaves rather than in a file
+             browser. -->
+        <button class="iconbtn" id="memoryBtn" title="Project memory (M)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+            <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+            <path d="M9.5 7h7M9.5 11h4.5" />
+          </svg>
+        </button>
         <button class="iconbtn" id="themeBtn" title="Light / dark">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
             <circle cx="12" cy="12" r="4.2" />
@@ -315,6 +330,21 @@
               </div>
               <label class="sw-toggle"><input type="checkbox" data-key="codexReplies" /><span class="track"></span></label>
             </div>
+            <!-- Propose, never write. The wording matters: the predecessor of
+                 this toggle banked a memory after every PR and rotted the
+                 context it meant to improve, so the promise here is that
+                 nothing reaches the repo's memory without recurrence or a
+                 press of Approve. -->
+            <div class="row">
+              <div class="label">
+                <div class="t">Propose memories</div>
+                <div class="d">
+                  Let a run suggest a durable lesson. It waits in Memory — nothing is remembered until a second run
+                  hits the same ground, or you approve it.
+                </div>
+              </div>
+              <label class="sw-toggle"><input type="checkbox" data-key="saveToMemory" /><span class="track"></span></label>
+            </div>
           </div>
         </div>
 
@@ -358,6 +388,62 @@
           <div class="spacer"></div>
           <button class="btn" id="dirCancel">Cancel</button>
           <button class="btn primary" id="dirChoose">Use this folder</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- =================================================== memory ===
+         Claude Code's project memory for the repo a job would run in, which is
+         MEMORY.md plus one file per remembered fact. Its own overlay rather
+         than a drawer: this is the one surface here you read *and write* prose
+         in, and the drawers are 440px of settings rows.
+
+         The editor is Milkdown, loaded on first open — it is 2.7MB of vendored
+         ProseMirror and the dashboard should not pay for it to draw a chat. -->
+    <div class="memscrim" id="memScrim">
+      <div class="mempanel" role="dialog" aria-modal="true" aria-labelledby="memTitle">
+        <div class="memhead">
+          <div class="memtitle">
+            <div class="t" id="memTitle">Memory</div>
+            <div class="s mono" id="memDir">—</div>
+          </div>
+          <button class="iconbtn panel-close" id="memClose" title="Close (Esc)">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+              <path d="M6 6l12 12M18 6L6 18" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="membody">
+          <div class="memlist" id="memList"></div>
+          <div class="mempane">
+            <!-- Frontmatter is metadata the memory system writes and reads by
+                 key, so it is shown rather than edited: a WYSIWYG pass over
+                 YAML would reformat it into something that no longer parses. -->
+            <div class="memmeta" id="memMeta" hidden></div>
+            <div class="memeditor" id="memEditor"></div>
+            <div class="memlinks" id="memLinks" hidden></div>
+          </div>
+        </div>
+
+        <!-- Two footers in one, swapped by what is open. A saved memory can be
+             edited or retired; a proposal has not been remembered yet, so the
+             only questions it answers are approve and discard. -->
+        <div class="memfoot">
+          <div class="d mono" id="memFile">—</div>
+          <button class="btn ghost" id="memArchive" hidden title="Retire this memory — moves it to .archive/, reversible">
+            Archive
+          </button>
+          <button class="btn ghost" id="memRestore" hidden title="Put this archived memory back in the index">
+            Restore
+          </button>
+          <div class="spacer"></div>
+          <div class="d" id="memStatus"></div>
+          <button class="btn ghost" id="memDiscard" hidden title="Drop this proposal — it is never remembered">
+            Discard
+          </button>
+          <button class="btn primary" id="memApprove" hidden title="Write this into the repo's memory">Approve</button>
+          <button class="btn primary" id="memSave" disabled>Save</button>
         </div>
       </div>
     </div>
