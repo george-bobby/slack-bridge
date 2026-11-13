@@ -8,7 +8,8 @@
 #          | verify | pr | review | resolve | sweep | memory | reply | done
 #          | error
 #   keys:  prUrl, linearUrl, action, who, channel, channelId, userId,
-#          permalink, threadTs, message
+#          permalink, threadTs, message, worktree, branch (recorded on the
+#          run's task folder, data/tasks/<runId>/meta.json, for cleanup)
 #   memory: verdict, territory, target, name, title, section, citation,
 #           textFile  (a *.md filename inside data/runs/memories/)
 #
@@ -26,8 +27,8 @@
 #   emit.sh 1784560120.179279 pr "Opened #4244" prUrl=https://github.com/…/4244
 #
 # BEST EFFORT, ALWAYS. It exits 0 whether or not the dashboard is listening,
-# never blocks longer than 2s, and prints nothing on success. A headless tick
-# must not fail, stall, or get chatty because a local UI happens to be closed.
+# never blocks longer than 2s, and prints nothing on success. A run started from
+# a terminal must not fail, stall, or get chatty because the dashboard is closed.
 
 RUN_ID="${1:-}"
 PHASE="${2:-step}"

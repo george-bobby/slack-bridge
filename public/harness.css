@@ -1,0 +1,107 @@
+/* The harness layer: orchestrator pin, Inbox, task panel, relay messages.
+   Built only from app.css's tokens, so both themes follow automatically. */
+
+/* --- sidebar ------------------------------------------------------------ */
+.pinned { padding-bottom: 6px; margin-bottom: 4px; border-bottom: 1px solid var(--line-soft); }
+.chatrow.orchrow { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+.chatrow.orchrow .who { font-weight: 680; }
+
+/* --- top bar ------------------------------------------------------------ */
+.inboxbtn { position: relative; }
+.inboxbtn .count {
+  position: absolute; top: 1px; right: 0; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px; background: var(--muted); color: #fff; font-size: 10px; font-weight: 700;
+  line-height: 16px; text-align: center;
+}
+.inboxbtn.hot .count { background: var(--warn); }
+
+/* --- relay / harness messages -------------------------------------------- */
+.hmsg .hcard {
+  width: 100%; border: 1px dashed var(--line); border-radius: 12px; background: var(--surface-2);
+  padding: 8px 12px;
+}
+.hmsg .hh { display: flex; gap: 8px; align-items: baseline; font-size: 10.5px; color: var(--muted); }
+.hmsg .hh .lbl { text-transform: uppercase; letter-spacing: 0.05em; font-weight: 650; }
+.hmsg .hh .t { margin-left: auto; }
+.hmsg .hb { font-size: 12.5px; color: var(--ink-2); margin-top: 4px; white-space: normal; overflow-wrap: anywhere; }
+.hmsg .hb p { margin: 0.25em 0; }
+
+/* --- segmented control --------------------------------------------------- */
+.modeswitch { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; margin: 2px 0 10px; }
+.modeswitch .seg {
+  border: 0; background: transparent; color: var(--ink-2); padding: 5px 12px; font: inherit;
+  font-size: 12px; cursor: pointer; text-transform: capitalize;
+}
+.modeswitch .seg + .seg { border-left: 1px solid var(--line); }
+.modeswitch .seg.on { background: var(--accent); color: #fff; }
+.modeswitch.small { margin: 0; }
+.modeswitch.small .seg { padding: 3px 9px; font-size: 11.5px; }
+
+/* --- inspector task panel ------------------------------------------------ */
+.taskpanel { display: flex; flex-direction: column; gap: 10px; padding-top: 10px; }
+.tp-status { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.tp-phase { font-size: 12px; color: var(--muted); }
+.tp-tldr { font-size: 13px; line-height: 1.45; color: var(--ink); }
+.tp-tldr p { margin: 0; }
+.tp-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 10px; margin: 0; font-size: 12px; }
+.tp-facts dt { color: var(--muted); }
+.tp-facts dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-2); }
+.tp-facts dd.mono, input.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; }
+.tp-report { border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; background: var(--surface); }
+.tp-report summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+.tp-report .text { font-size: 12.5px; max-height: 420px; overflow: auto; overflow-wrap: anywhere; }
+.spawnbox textarea, .spawnbox input, .dcard textarea, .todoadd input {
+  width: 100%; box-sizing: border-box; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface-2); color: var(--ink); font: inherit; font-size: 12.5px; padding: 7px 9px;
+}
+.spawnbox .btn { margin-top: 8px; }
+.orch-tasks { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; }
+.orch-task {
+  display: flex; gap: 8px; align-items: center; border: 0; background: transparent; color: var(--ink-2);
+  font: inherit; font-size: 12.5px; padding: 4px 2px; cursor: pointer; text-align: left;
+}
+.orch-task:hover { color: var(--ink); }
+.orch-task .tt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- inbox --------------------------------------------------------------- */
+#inboxBody .sect { margin-top: 6px; }
+.dcard { border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; margin: 8px 0; background: var(--surface); }
+.dcard.question { border-left: 3px solid var(--warn); }
+.dcard.action { border-left: 3px solid var(--accent); }
+.dcard.resume { border-left: 3px solid var(--bad); }
+.dcard .dh { display: flex; gap: 8px; align-items: center; }
+.dcard .dt {
+  border: 0; background: none; color: var(--ink); font: inherit; font-weight: 600; font-size: 12.5px;
+  cursor: pointer; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.dcard .dt:hover { text-decoration: underline; }
+.dcard .when, .evrow .when { margin-left: auto; color: var(--muted); font-size: 11px; flex: 0 0 auto; }
+.dcard .db { font-size: 13px; margin-top: 6px; overflow-wrap: anywhere; }
+.dcard .db p { margin: 0.3em 0; }
+.dcard .drow { display: flex; gap: 6px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+.dcard .drow input[type="date"] {
+  border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--ink);
+  font: inherit; font-size: 12px; padding: 4px 6px;
+}
+.todorow { display: flex; gap: 8px; align-items: center; padding: 5px 0; font-size: 13px; }
+.todorow .tx { flex: 1 1 auto; min-width: 0; }
+.evrow {
+  display: flex; gap: 8px; width: 100%; border: 0; background: transparent; color: var(--ink-2); font: inherit;
+  font-size: 12px; padding: 4px 0; cursor: pointer; text-align: left; align-items: baseline;
+}
+.evrow .when { margin-left: 0; width: 34px; }
+.evrow .nm { flex: 0 0 auto; font-weight: 600; color: var(--ink); }
+.evrow .tx { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* --- settings ------------------------------------------------------------ */
+#harnessSettings .sublbl { margin-top: 14px; }
+.numin {
+  width: 64px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); color: var(--ink);
+  font: inherit; font-size: 12.5px; padding: 4px 6px; text-align: right;
+}
+
+/* --- status tones -------------------------------------------------------- */
+.badge.hs-good { background: color-mix(in srgb, var(--on) 17%, transparent); color: var(--on); }
+.badge.hs-warn { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.badge.hs-bad { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
+.badge.hs-accent { background: color-mix(in srgb, var(--accent) 17%, transparent); color: var(--accent-ink); }

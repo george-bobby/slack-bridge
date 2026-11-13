@@ -3,17 +3,23 @@
   "version": "2.0.0",
   "private": true,
   "license": "MIT",
-  "description": "Zero-dependency local control panel for the Slack -> Claude Code fetch pipeline. Mention detection, context, replies and Linear all run through the claude.ai Slack/Linear MCP connectors (via the /scan-mentions poller) - this server only owns the toggle dashboard and shared state.",
-  "keywords": ["slack", "claude-code", "linear", "automation", "dashboard"],
+  "description": "Zero-dependency local dashboard for running a Slack thread through Claude Code end to end: paste a thread link, and a session reads it via the Slack connector, root-causes it, builds, opens a PR and replies, asking you at each gate. Nothing runs on a timer and no Slack token or bot is involved.",
+  "keywords": [
+    "slack",
+    "claude-code",
+    "linear",
+    "dashboard"
+  ],
   "main": "index.js",
   "type": "commonjs",
   "engines": {
     "node": ">=18"
   },
   "scripts": {
-    "start": "node index.js",
+    "start": "node lib/render.js && node index.js",
+    "dev": "node lib/render.js && node --watch-path=index.js --watch-path=lib index.js",
     "render": "node lib/render.js",
-    "install-agent": "./scripts/install.sh",
-    "tick": "./scripts/run-once.sh"
+    "install-agent": "./scripts/install.sh start",
+    "test": "node --test --test-concurrency=1 test/*.test.js"
   }
 }

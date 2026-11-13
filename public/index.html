@@ -9,6 +9,7 @@
          the page; only the editor's 2.7MB of JS is deferred to first open. -->
     <link rel="stylesheet" href="/vendor/milkdown.css" />
     <link rel="stylesheet" href="/app.css" />
+    <link rel="stylesheet" href="/harness.css" />
     <link
       rel="icon"
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c74ff'/%3E%3Cpath d='M9 20l4-8 3 5 2-3 5 6' stroke='white' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"
@@ -28,28 +29,29 @@
           Slack Bridge
         </div>
 
-        <button class="btn" id="pollBtn" title="Run one poller tick right now (takes the same lock as launchd)">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 12a9 9 0 1 1-2.64-6.36" /><path d="M21 3v6h-6" />
+        <!-- The only way work starts: paste a Slack thread link (Enter opens the
+             chat and runs the pipeline), or type a task in words, which goes to
+             the Orchestrator to brief and spawn a worker. Nothing watches Slack. -->
+        <form class="linkform" id="linkForm" autocomplete="off">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" /><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" />
           </svg>
-          Poll now
-        </button>
+          <input id="linkInput" type="text" placeholder="Paste a Slack thread link, or tell the orchestrator what to do…" spellcheck="false" />
+          <button class="btn primary" id="linkGo" type="submit" title="Open the chat and run the pipeline">Run</button>
+        </form>
 
         <div class="spacer"></div>
 
-        <!-- One pill, two facts: is anything watching Slack, and how often.
-             They were separate pills that always had to be read together. -->
-        <button class="pill" id="statusPill"><span class="dot"></span><span id="statusText">connecting…</span></button>
+        <!-- Everything waiting on you: workers' questions and action requests,
+             to-dos only you can do, and what happened recently. -->
+        <button class="iconbtn inboxbtn" id="inboxBtn" title="Inbox (I)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 12h-6l-2 3h-4l-2-3H2" />
+            <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+          </svg>
+          <span class="count" id="inboxCount" hidden></span>
+        </button>
         <button class="pill money hide-sm" id="costPill" title="Spent today — open the spend breakdown">—</button>
-
-        <!-- Two states, not three: this answers "what does it do when it finds
-             something", and the tick switch in the Schedule panel answers "is
-             it running at all". Off used to be a third button here and meant
-             the same thing as stopping the tick. -->
-        <div class="seg mode" role="tablist" id="modeSeg">
-          <button role="tab" data-mode="watch" aria-selected="false">Watch</button>
-          <button role="tab" data-mode="auto" aria-selected="false">Auto</button>
-        </div>
 
         <!-- What Claude Code already knows about the repo a job runs in. It is
              read into every headless run, so it belongs next to the other
@@ -84,7 +86,7 @@
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
                 <circle cx="11" cy="11" r="7" /><path d="M20 20l-3.2-3.2" />
               </svg>
-              <input id="q" type="search" placeholder="Search mentions…" autocomplete="off" />
+              <input id="q" type="search" placeholder="Search chats…" autocomplete="off" />
               <kbd>⌘K</kbd>
             </div>
 
@@ -125,8 +127,7 @@
 
       <!-- ======================================================== main === -->
       <main class="main">
-        <!-- Poller-level problems, not chat-level: they used to live on the
-             Activity tab, which is gone. They render empty almost always. -->
+        <!-- App-level notices, not chat-level. They render empty almost always. -->
         <div id="banners"></div>
 
         <section class="view">
@@ -134,8 +135,8 @@
             <div class="inner">
               <h2>Nothing selected</h2>
               <p>
-                Every @mention of you lands in the list on the left — worked, skipped or
-                untouched. Open one to read what happened, or reply to pick it back up.
+                Paste a Slack thread link above to start a run. Every thread you hand over lands in the
+                list on the left; open one to read what happened, or reply to pick it back up.
               </p>
               <div class="keys">
                 <kbd>⌘K</kbd><kbd>↑ ↓ to move</kbd><kbd>⌘↵ to send</kbd><kbd>, for settings</kbd>
@@ -172,87 +173,18 @@
           </div>
         </div>
         <div class="insp-body" id="inspBody">
-          <div class="insp-empty">Open a mention to watch its stages.</div>
+          <div class="insp-empty">Open a chat to watch its stages.</div>
         </div>
       </aside>
     </div>
 
     <!-- ================================================ side panels ===
          One panel per thing you can click in the top bar, each holding only
-         what that thing owns: the runner pill opens Schedule, the cost pill
-         opens Spend, the gear opens Settings. They share a scrim and only one
+         what that thing owns: the cost pill opens Spend, the gear opens
+         Settings. They share a scrim and only one
          is ever open — clicking a second pill swaps the panel rather than
          stacking. -->
     <div class="scrim" id="scrim"></div>
-
-    <!-- ---------------------------------------------------- schedule --- -->
-    <aside class="drawer" id="panelSchedule" aria-hidden="true">
-      <header>
-        <h2>Schedule</h2>
-        <div class="spacer"></div>
-        <button class="iconbtn panel-close" title="Close">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
-            <path d="M6 6l12 12M18 6L6 18" />
-          </svg>
-        </button>
-      </header>
-      <div class="content">
-        <div class="sect">
-          <div class="lbl">Poller tick</div>
-          <div class="row">
-            <div class="label">
-              <div class="t">Watch Slack on a timer</div>
-              <div class="d" id="tickNote">—</div>
-            </div>
-            <label class="sw-toggle"><input type="checkbox" id="tickSwitch" /><span class="track"></span></label>
-          </div>
-          <div class="field" id="cadenceField">
-            <label for="setInterval">Every</label>
-            <div class="cadence">
-              <input id="setInterval" type="number" min="30" step="30" />
-              <span class="unit">seconds</span>
-            </div>
-            <div class="presets" id="cadencePresets">
-              <button data-sec="60">1m</button>
-              <button data-sec="300">5m</button>
-              <button data-sec="900">15m</button>
-              <button data-sec="3600">1h</button>
-            </div>
-            <div class="d">Saving reloads the launchd job, since launchd owns the firing interval.</div>
-          </div>
-          <div class="grid2">
-            <div class="field">
-              <label for="setHours">Active hours</label>
-              <input id="setHours" type="text" placeholder="08-20" />
-              <div class="d">Empty = always.</div>
-            </div>
-            <div class="field">
-              <label for="setDays">Active days</label>
-              <input id="setDays" type="text" placeholder="12345" />
-              <div class="d">1=Mon … 7=Sun.</div>
-            </div>
-          </div>
-          <div class="field">
-            <label for="setModel">Scan model</label>
-            <input id="setModel" type="text" placeholder="haiku" />
-            <div class="d">Ticks are cheap because triage is easy.</div>
-          </div>
-        </div>
-
-        <div class="sect">
-          <div class="lbl">Last tick</div>
-          <div class="row">
-            <div class="label"><div class="t">Runner</div><div class="d" id="diagRunner">—</div></div>
-          </div>
-          <div class="row">
-            <div class="label"><div class="t">Slack MCP</div><div class="d" id="diagMcp">—</div></div>
-          </div>
-          <div class="row">
-            <div class="label"><div class="t">Watermark</div><div class="d mono" id="diagTs">—</div></div>
-          </div>
-        </div>
-      </div>
-    </aside>
 
     <!-- ------------------------------------------------------- spend --- -->
     <aside class="drawer" id="panelSpend" aria-hidden="true">
@@ -273,8 +205,7 @@
             <div class="chart-head">
               <div class="chart-title">Last 14 days</div>
               <div class="legend">
-                <span class="item"><span class="sw" style="background: var(--series-1)"></span>Watching</span>
-                <span class="item"><span class="sw" style="background: var(--series-2)"></span>Runs</span>
+                <span class="item"><span class="sw" style="background: var(--series-2)"></span>Jobs</span>
               </div>
             </div>
             <div class="chart-wrap">
@@ -283,12 +214,25 @@
             </div>
           </div>
           <div class="d" style="padding-top: 10px">
-            Every tick is a fresh <code>claude -p</code> with no cache reuse, so a poll that finds
-            nothing still costs a session. Ticks above 5&times; the median count as pipeline runs, so
-            one $4 build never gets extrapolated into a $100/day projection.
+            What the pipeline runs and follow-ups you started have cost, read off each job's own
+            reported total. Nothing runs unless you start it, so there is no idle spend.
           </div>
         </div>
       </div>
+    </aside>
+
+    <!-- ------------------------------------------------------- inbox --- -->
+    <aside class="drawer" id="panelInbox" aria-hidden="true">
+      <header>
+        <h2>Inbox</h2>
+        <div class="spacer"></div>
+        <button class="iconbtn panel-close" title="Close">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      </header>
+      <div class="content" id="inboxBody"></div>
     </aside>
 
     <!-- ---------------------------------------------------- settings --- -->
@@ -309,26 +253,26 @@
             <div class="row">
               <div class="label">
                 <div class="t">Reply in the thread</div>
-                <div class="d">Post the verdict + PR/Linear links back in Slack when a run finishes.</div>
+                <div class="d">Draft the verdict + PR/Linear links for the thread, and post it once you approve.</div>
               </div>
               <label class="sw-toggle"><input type="checkbox" data-key="reply" /><span class="track"></span></label>
             </div>
             <div class="row">
               <div class="label">
-                <div class="t">File Linear ticket via <code>@Linear</code></div>
+                <div class="t">Offer a Linear ticket</div>
                 <div class="d">
-                  Once the root cause checks out, post the one-line command in the thread and build from
-                  the issue the bot files. Posts even when reply is off — that's work tracking, not a verdict.
+                  Once the root cause checks out, draft a ticket and ask you before creating it in Linear.
+                  Off: build from the thread alone.
                 </div>
               </div>
               <label class="sw-toggle"><input type="checkbox" data-key="createLinearIssue" /><span class="track"></span></label>
             </div>
             <div class="row">
               <div class="label">
-                <div class="t">Codex review + resolve</div>
-                <div class="d">After the PR opens, request a Codex review, poll until it lands, run <code>/resolve</code>.</div>
+                <div class="t">Bot review + resolve</div>
+                <div class="d">After the PR opens, wait for the review bots on the head commit, then run <code>/resolve</code>.</div>
               </div>
-              <label class="sw-toggle"><input type="checkbox" data-key="codexReplies" /><span class="track"></span></label>
+              <label class="sw-toggle"><input type="checkbox" data-key="botReview" /><span class="track"></span></label>
             </div>
             <!-- Propose, never write. The wording matters: the predecessor of
                  this toggle banked a memory after every PR and rotted the
@@ -358,6 +302,13 @@
           <div class="d" id="defaultOptsNote"></div>
         </div>
 
+        <!-- The harness: how outcomes reach you, how many workers run, and
+             which outward writes stop for your OK on the exact payload. -->
+        <div class="sect">
+          <div class="lbl">Harness</div>
+          <div id="harnessSettings"></div>
+        </div>
+
         <!-- Browser-level, not a server setting: it lives in localStorage and
              is per browser, because the permission it depends on is too. -->
         <div class="sect">
@@ -376,7 +327,7 @@
     <!-- ===================================================== palette === -->
     <div class="palette-scrim" id="paletteScrim">
       <div class="palette">
-        <input id="paletteInput" type="text" placeholder="Jump to a mention, or type a command…" autocomplete="off" />
+        <input id="paletteInput" type="text" placeholder="Jump to a chat, or type a command…" autocomplete="off" />
         <div class="results" id="paletteResults"></div>
       </div>
     </div>
@@ -489,9 +440,8 @@
     </div>
 
     <!-- ================================================== confirm ===
-         Deleting a chat throws away a transcript that cannot be rebuilt — the
-         poller's watermark has long since moved past the mention — so it asks
-         first. Deliberately a real dialog rather than window.confirm(): this
+         Deleting a chat throws away a transcript that cannot be rebuilt, so it
+         asks first. Deliberately a real dialog rather than window.confirm(): this
          one has to name what is about to go, and how much it cost to make. -->
     <div class="confirmscrim" id="confirmScrim">
       <div class="confirmbox" role="alertdialog" aria-modal="true" aria-labelledby="confirmTitle">
@@ -507,5 +457,6 @@
 
     <div class="toasts" id="toasts"></div>
     <script src="/app.js"></script>
+    <script src="/harness.js"></script>
   </body>
 </html>
