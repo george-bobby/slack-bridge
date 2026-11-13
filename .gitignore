@@ -6,17 +6,16 @@
 .env.*.local
 
 # ─── Generated prompts ───────────────────────────────────────────────────────
-# scripts/install.sh renders templates/ into .claude/ with this machine's .env
-# baked in, then symlinks the result into ~/.claude. The templates are source;
-# these are build output.
+# scripts/install.sh renders templates/ into .claude/skills/ with this
+# machine's .env baked in, then symlinks the result into ~/.claude. The
+# templates are source; these are build output.
 .claude/commands/
 .claude/skills/
 
 # ─── Runtime state ───────────────────────────────────────────────────────────
-# Everything the dashboard and the poller write: config.json, state.json,
-# activity.json, cost.json, runs/ (chat transcripts, which contain Slack
-# message text) and the single-flight lock. One rule, one directory — the
-# committed example is the sole exception.
+# Everything the dashboard writes: config.json and runs/ (chat transcripts,
+# which contain Slack message text, plus plans and memory proposals). One
+# rule, one directory; the committed example is the sole exception.
 data/*
 !data/config.example.json
 
@@ -35,3 +34,7 @@ package-lock.json
 .vscode/
 *.swp
 *~
+
+# Your own copies of templates/ (e.g. a repo-specific skill). Rendered in
+# preference to templates/ and never committed.
+templates.local/

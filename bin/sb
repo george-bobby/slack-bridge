@@ -1,0 +1,248 @@
+#!/usr/bin/env node
+/**
+ * sb — the harness from a shell. Used by the orchestrator, by workers
+ * (`sb declare`), and by you. Every command is a call to the local dashboard,
+ * which owns the state; this script holds none.
+ *
+ *   sb spawn --repo <path> --title "<t>" (--brief "<text>" | --brief-file <f>) [--branch b] [--model m] [--no-start]
+ *   sb slack <slack thread url>
+ *   sb status [--json]
+ *   sb show <id>
+ *   sb followup <id> "<message>"          queued if the worker is mid-turn
+ *   sb relaunch <id> [--note "<text>"]
+ *   sb declare waiting|resumed|phase "<text>"   (task from $SB_TASK_ID, or --task <id>)
+ *   sb decisions
+ *   sb decide <decision-id> "<answer>"    | sb approve <decision-id> | sb dismiss <decision-id>
+ *   sb defer <decision-id> YYYY-MM-DD
+ *   sb todo add <key> "<text>" | sb todo done <key> | sb todo list
+ *   sb catchup [--since 3h]
+ *   sb cleanup <id> [--force]
+ *   sb mode normal|quiet|away
+ *
+ * The dashboard's address comes from $SB_URL (set in every harness session),
+ * else SLACK_BRIDGE_PORT in .env, else 4319.
+ */
+
+const fs = require("fs");
+const path = require("path");
+
+const ROOT = path.join(__dirname, "..");
+
+function baseUrl() {
+  if (process.env.SB_URL) return process.env.SB_URL.replace(/\/+$/, "");
+  let port = process.env.SLACK_BRIDGE_PORT;
+  if (!port) {
+    try {
+      const m = fs.readFileSync(path.join(ROOT, ".env"), "utf8").match(/^\s*SLACK_BRIDGE_PORT\s*=\s*["']?(\d+)/m);
+      if (m) port = m[1];
+    } catch {}
+  }
+  return `http://127.0.0.1:${port || 4319}`;
+}
+
+async function call(method, p, body) {
+  let res;
+  try {
+    res = await fetch(baseUrl() + p, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    die(`the dashboard isn't reachable at ${baseUrl()} (${e.cause ? e.cause.code || e.message : e.message}). Start it: npm start`);
+  }
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok || out.ok === false) die(out.error || `HTTP ${res.status}`, res.status === 409 ? 3 : 1);
+  return out;
+}
+
+function die(msg, code = 1) {
+  process.stderr.write(`sb: ${msg}\n`);
+  process.exit(code);
+}
+
+/** --flag value / --flag=value / bare flags; positionals stay in order. */
+function parse(argv) {
+  const flags = {};
+  const pos = [];
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a.startsWith("--")) {
+      const eq = a.indexOf("=");
+      if (eq > 0) flags[a.slice(2, eq)] = a.slice(eq + 1);
+      else if (argv[i + 1] !== undefined && !argv[i + 1].startsWith("--")) flags[a.slice(2)] = argv[++i];
+      else flags[a.slice(2)] = true;
+    } else pos.push(a);
+  }
+  return { flags, pos };
+}
+
+const ago = (t) => {
+  if (!t) return "";
+  const s = Math.floor(Date.now() / 1000) - t;
+  return s < 90 ? `${s}s` : s < 5400 ? `${Math.round(s / 60)}m` : s < 172800 ? `${Math.round(s / 3600)}h` : `${Math.round(s / 86400)}d`;
+};
+
+function printTask(t) {
+  const state = t.live ? (t.awaiting ? "LIVE·asking" : `LIVE${t.idleSec != null ? ` idle ${t.idleSec}s` : ""}`) : "idle";
+  console.log(`${t.id}  [${t.status || "?"}] ${state}  ${t.title}`);
+  const extra = [t.phase && `phase: ${t.phase}`, t.declared && t.declared.state === "waiting" && `waiting: ${t.declared.text}`, t.pr && `pr: ${t.pr}`, t.queuedFollowups && `${t.queuedFollowups} queued follow-up(s)`]
+    .filter(Boolean)
+    .join(" · ");
+  if (extra) console.log(`    ${extra}`);
+  if (t.tldr) console.log(`    ${t.tldr.replace(/\s+/g, " ").slice(0, 200)}`);
+  for (const n of t.notes || []) console.log(`    ! ${n}`);
+}
+
+function printDecisions(list) {
+  if (!list.length) return console.log("No decisions waiting.");
+  for (const d of list) {
+    console.log(`${d.id}  (${d.kind}${d.state === "deferred" ? `, deferred to ${d.deferUntil}` : ""})  ${d.title || d.taskId}`);
+    console.log(`    ${d.text.replace(/\n/g, "\n    ")}`);
+  }
+}
+
+async function main() {
+  const [cmd, ...rest] = process.argv.slice(2);
+  const { flags, pos } = parse(rest);
+
+  switch (cmd) {
+    case "spawn": {
+      let brief = flags.brief;
+      if (flags["brief-file"]) brief = fs.readFileSync(String(flags["brief-file"]), "utf8");
+      if (!brief || brief === true) die("spawn needs --brief <text> or --brief-file <file>");
+      const opts = {};
+      if (flags.model) opts.model = flags.model;
+      if (flags.mode) opts.permissionMode = flags.mode;
+      const out = await call("POST", "/api/tasks", {
+        repo: flags.repo,
+        title: flags.title,
+        brief,
+        branch: flags.branch,
+        opts,
+        start: !flags["no-start"],
+      });
+      console.log(`${out.taskId}  ${out.state}`);
+      console.log(`  branch:   ${out.branch}`);
+      console.log(`  worktree: ${out.worktree}`);
+      console.log(`  brief:    ${out.brief}`);
+      return;
+    }
+    case "slack": {
+      if (!pos[0]) die("slack <thread url>");
+      const out = await call("POST", "/api/runs", { url: pos[0], start: true });
+      console.log(`${out.runId}  ${out.started ? "started" : out.queued ? "queued" : out.created ? "created" : "already had a chat"}`);
+      return;
+    }
+    case "status": {
+      const out = await call("GET", "/api/tasks");
+      if (flags.json) return console.log(JSON.stringify(out.tasks, null, 2));
+      const live = out.tasks.filter((t) => t.status !== "cleaned");
+      console.log(`${out.working} working · cap ${out.harness.maxWorkers} total / ${out.harness.maxPerRepo} per repo · mode ${out.harness.mode}`);
+      if (!live.length) return console.log("No tasks.");
+      for (const t of live) printTask(t);
+      return;
+    }
+    case "show": {
+      if (!pos[0]) die("show <id>");
+      const out = await call("GET", `/api/tasks/${encodeURIComponent(pos[0])}`);
+      console.log(JSON.stringify({ ...out.meta, live: out.live, worktreeState: out.worktree }, null, 2));
+      console.log("\n--- report.md ---\n" + (out.report || "(no report yet)"));
+      return;
+    }
+    case "followup": {
+      if (!pos[0] || !pos[1]) die('followup <id> "<message>"');
+      const out = await call("POST", `/api/runs/${encodeURIComponent(pos[0])}/followup`, { text: pos.slice(1).join(" "), queue: true });
+      console.log(out.queued ? "queued: delivered when the worker's current turn ends" : "sent");
+      return;
+    }
+    case "relaunch": {
+      if (!pos[0]) die("relaunch <id>");
+      await call("POST", `/api/tasks/${encodeURIComponent(pos[0])}/relaunch`, { note: flags.note || "" });
+      console.log("relaunched");
+      return;
+    }
+    case "declare": {
+      const task = flags.task || process.env.SB_TASK_ID;
+      if (!task) die("declare needs $SB_TASK_ID (set in harness sessions) or --task <id>");
+      if (!pos[0]) die('declare waiting|resumed|phase "<text>"');
+      await call("POST", `/api/tasks/${encodeURIComponent(task)}/declare`, { state: pos[0], text: pos.slice(1).join(" ") });
+      console.log(`declared ${pos[0]}`);
+      return;
+    }
+    case "decisions": {
+      const out = await call("GET", "/api/inbox");
+      return printDecisions(out.decisions);
+    }
+    case "decide":
+    case "approve":
+    case "dismiss": {
+      if (!pos[0]) die(`${cmd} <decision-id>${cmd === "decide" ? ' "<answer>"' : ""}`);
+      const action = cmd === "dismiss" ? "dismiss" : "answer";
+      if (cmd === "decide" && !pos[1]) die('decide <decision-id> "<answer>"');
+      const out = await call("POST", `/api/decisions/${encodeURIComponent(pos[0])}`, { action, answer: pos.slice(1).join(" ") });
+      console.log(`${out.decision.id} ${out.decision.state}${out.decision.deliveredAs ? ` (${out.decision.deliveredAs})` : ""}`);
+      return;
+    }
+    case "defer": {
+      if (!pos[0] || !/^\d{4}-\d{2}-\d{2}$/.test(pos[1] || "")) die("defer <decision-id> YYYY-MM-DD");
+      await call("POST", `/api/decisions/${encodeURIComponent(pos[0])}`, { action: "defer", answer: pos[1] });
+      console.log(`deferred to ${pos[1]}`);
+      return;
+    }
+    case "todo": {
+      const [sub, ...args] = pos;
+      if (sub === "add") {
+        if (!args[0] || !args[1]) die('todo add <key> "<text>"');
+        const out = await call("POST", "/api/todos", { key: args[0], text: args.slice(1).join(" "), url: flags.url || "" });
+        if (out.duplicate) die(`already on the list: ${out.todo.key} (${out.todo.text})`, 3);
+        console.log(`added ${out.todo.key}`);
+        return;
+      }
+      if (sub === "done") {
+        if (!args[0]) die("todo done <key>");
+        await call("POST", "/api/todos/done", { key: args[0] });
+        console.log(`done ${args[0]}`);
+        return;
+      }
+      const out = await call("GET", "/api/inbox");
+      if (!out.todos.length) return console.log("No to-dos.");
+      for (const t of out.todos) console.log(`${t.key}  ${t.text}${t.url ? `  ${t.url}` : ""}  (${ago(t.createdAt)})`);
+      return;
+    }
+    case "catchup": {
+      const out = await call("GET", `/api/catchup?since=${encodeURIComponent(flags.since || "8h")}`);
+      if (flags.json) return console.log(JSON.stringify(out, null, 2));
+      console.log(`== Waiting on you (mode: ${out.mode}) ==`);
+      printDecisions(out.decisions);
+      if (out.todos.length) {
+        console.log("\n== To-dos ==");
+        for (const t of out.todos) console.log(`${t.key}  ${t.text}${t.url ? `  ${t.url}` : ""}`);
+      }
+      console.log("\n== Tasks ==");
+      if (!out.tasks.length) console.log("No tasks.");
+      for (const t of out.tasks) printTask(t);
+      console.log(`\n== Events since ${flags.since || "8h"} ago ==`);
+      if (!out.events.length) console.log("Nothing happened.");
+      for (const e of out.events) console.log(`${ago(e.at).padStart(4)} ago  ${e.name.padEnd(20)} ${e.taskId}  ${String(e.text || "").replace(/\s+/g, " ").slice(0, 140)}`);
+      return;
+    }
+    case "cleanup": {
+      if (!pos[0]) die("cleanup <id> [--force]");
+      const out = await call("POST", `/api/tasks/${encodeURIComponent(pos[0])}/cleanup`, { force: !!flags.force });
+      console.log(`${out.removed ? "worktree removed" : out.note || "nothing to remove"}${out.branch ? `; branch ${out.branch} kept` : ""}${out.killed && out.killed.length ? `; stopped pids ${out.killed.join(", ")}` : ""}`);
+      return;
+    }
+    case "mode": {
+      if (!pos[0]) die("mode normal|quiet|away");
+      const out = await call("POST", "/api/mode", { mode: pos[0] });
+      console.log(`mode: ${out.harness.mode}`);
+      return;
+    }
+    default:
+      process.stdout.write(fs.readFileSync(__filename, "utf8").split("*/")[0].replace(/^#!.*\n\/\*\*\n/, "").replace(/^ \* ?/gm, ""));
+      if (cmd && cmd !== "help" && cmd !== "--help") process.exit(2);
+  }
+}
+
+main().catch((e) => die(e.message));

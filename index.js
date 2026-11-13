@@ -3,22 +3,20 @@
  * slack-bridge dashboard
  *
  * A zero-dependency local control panel for the Slack -> Claude Code fetch
- * pipeline. It does NOT talk to Slack. Mention detection, context gathering,
- * replies and Linear all happen inside Claude Code via the claude.ai Slack /
- * Linear MCP connectors, driven by the `/scan-mentions` poller.
+ * pipeline. It does NOT talk to Slack and holds no Slack credentials. You paste
+ * a Slack thread link; a Claude Code session reads the thread, replies and
+ * files Linear tickets through the Slack / Linear MCP connectors it already
+ * has. Nothing runs on a timer — every job here is one you started.
  *
  * What it owns:
- *   data/config.json    toggles + poller settings (dashboard writes, poller reads)
- *   data/state.json     the poller's watermark + heartbeat (poller writes)
- *   data/activity.json  the poller's rolling log of processed mentions
- *   data/cost.json      per-tick $ ledger (scripts/run-once.sh appends)
- *   data/runs/<id>.json one chat per mention: transcript, phases, follow-ups
+ *   data/config.json    pipeline gates + job defaults (Settings writes it)
+ *   data/runs/<id>.json one chat per Slack thread: transcript, phases, follow-ups
  *
- * The chat is the new surface: every mention is a thread you can scroll back
- * through and *reply to*, which spawns a real Claude session against the repo
- * (see lib/jobs.js). That is why every mutating route below is origin-checked
- * and the listener is pinned to loopback — a page on the open web must not be
- * able to POST a follow-up into a session that runs with permissions skipped.
+ * Every chat has a composer: replying spawns a real Claude session against
+ * the repo (see lib/jobs.js). That is why every mutating route below is
+ * origin-checked and the listener is pinned to loopback — a page on the open
+ * web must not be able to POST a follow-up into a session that runs with
+ * permissions skipped.
  *
  * Run:  node index.js        (open http://localhost:4319)
  */
@@ -27,46 +25,21 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
-const { execFile } = require("child_process");
-const { Readable } = require("stream");
 
 const env = require("./lib/env");
 const store = require("./lib/store");
-const slack = require("./lib/slack");
 const jobs = require("./lib/jobs");
 const memory = require("./lib/memory");
 const proposals = require("./lib/proposals");
 const bus = require("./lib/bus");
+const harness = require("./lib/harness");
+const tasks = require("./lib/tasks");
 
 const ROOT = __dirname;
 // PORT stays supported for a one-off override; SLACK_BRIDGE_PORT in .env is
-// the setting emit.sh and inbox.sh also read, so the three agree by default.
+// the setting emit.sh also reads, so the two agree by default.
 const PORT = Number(process.env.PORT) || env.port;
 const PUBLIC = path.join(ROOT, "public");
-const LAUNCHD_LABEL = env.launchdLabel;
-
-/* --------------------------------------------------------------- launchd */
-
-// Whether the launchd job is loaded, refreshed out-of-band so /api/state never
-// blocks on launchctl. The poller's self-reported `runner` says who ran the
-// last tick; this says whether the job is installed at all. The pair is what
-// distinguishes "installed but never ticked" from "not installed", and catches
-// a hand-run tick racing the job on state.json.
-let cronInstalled = false;
-
-function refreshCronInstalled() {
-  execFile(
-    "/bin/launchctl",
-    ["print", `gui/${process.getuid()}/${LAUNCHD_LABEL}`],
-    { timeout: 4000 },
-    (err) => {
-      const next = !err;
-      if (next === cronInstalled) return;
-      cronInstalled = next;
-      bus.broadcast("state", snapshot());
-    }
-  );
-}
 
 /* ------------------------------------------------------------- http utils */
 
@@ -101,7 +74,7 @@ function sameOrigin(req) {
   const hostOk = /^(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i.test(host);
   const origin = req.headers.origin;
   if (!hostOk) return false;
-  if (!origin) return true; // curl / the poller's emit.sh send no Origin
+  if (!origin) return true; // curl / a run's emit.sh send no Origin
   return /^https?:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?$/i.test(origin);
 }
 
@@ -135,85 +108,6 @@ function serveStatic(res, urlPath) {
     });
     res.end(buf);
   });
-}
-
-/* ----------------------------------------------------- slack attachments */
-
-/**
- * Stream one Slack attachment to the page, with the token attached here.
- *
- * The whole reason this route exists is that `files.slack.com` serves nothing
- * without an `Authorization` header, so the page cannot fetch an attachment
- * itself and must not be handed a token to try. See lib/slack.js.
- *
- * Addressed by (run, file id) rather than by URL. A URL parameter would make
- * this an open proxy that attaches a workspace credential to anything asked of
- * it; a file id can only resolve to a URL some message in that chat already
- * recorded.
- *
- * The response headers are the other half. These are bytes a colleague chose,
- * served from the origin that can start a Claude session with permissions
- * skipped — so the type is the one *we* recorded rather than whatever Slack
- * echoes back, sniffing is off, anything that isn't obviously media downloads
- * instead of rendering, and the CSP means even an HTML file that got through
- * would run nothing.
- */
-function findAttachment(run, fileId) {
-  const id = String(fileId || "");
-  if (!id) return null;
-  for (const m of run.messages || []) {
-    for (const f of m.files || []) if (f && f.id === id) return f;
-  }
-  return null;
-}
-
-async function serveSlackFile(req, res, params) {
-  const id = store.safeId(String(params.get("run") || ""));
-  const run = id ? store.loadRun(id) : null;
-  const file = run ? findAttachment(run, params.get("id")) : null;
-  if (!file) {
-    sendJson(res, 404, { ok: false, error: "no such attachment" });
-    return;
-  }
-
-  // The poster frame, when the page is drawing a video it hasn't played yet.
-  const poster = params.get("v") === "thumb" && file.thumb;
-  const src = poster ? file.thumb : file.url;
-  const mime = poster ? "image/jpeg" : file.mime;
-
-  let upstream;
-  try {
-    upstream = await slack.fetchFile(src, { range: req.headers.range });
-  } catch (e) {
-    // 502 and not 404: the file exists, we could not get it — almost always
-    // the missing `files:read` scope, and the page says so on the card.
-    sendJson(res, 502, { ok: false, error: String(e.message || e) });
-    return;
-  }
-
-  const name = String(file.name || "attachment").replace(/["\\\r\n]/g, "");
-  const headers = {
-    "Content-Type": mime,
-    "Content-Disposition": `${slack.INLINE.test(mime) ? "inline" : "attachment"}; filename="${name}"`,
-    "X-Content-Type-Options": "nosniff",
-    "Content-Security-Policy": "default-src 'none'; sandbox",
-    "Accept-Ranges": "bytes",
-    // Private and short: a chat re-renders on every SSE tick, and re-pulling a
-    // 5MB screen recording from Slack each time would be absurd.
-    "Cache-Control": "private, max-age=3600",
-  };
-  for (const [from, to] of [["content-length", "Content-Length"], ["content-range", "Content-Range"]]) {
-    const v = upstream.headers.get(from);
-    if (v) headers[to] = v;
-  }
-
-  res.writeHead(upstream.status, headers);
-  const body = Readable.fromWeb(upstream.body);
-  // Scrubbing a video leaves half-read responses behind constantly; without
-  // this each one holds a socket to Slack open until it times out.
-  res.on("close", () => body.destroy());
-  body.on("error", () => res.destroy());
-  body.pipe(res);
 }
 
 /* -------------------------------------------------------------- job opts */
@@ -274,10 +168,9 @@ function listDirs(dir) {
 function snapshot() {
   return {
     config: store.readConfig(),
-    state: store.readState(),
-    cronInstalled,
     cost: store.summariseCost(),
     jobs: { running: jobs.runningIds(), awaiting: jobs.awaitingIds() },
+    inbox: harness.inbox().counts,
     // Only what the page actually draws: the repo a new chat's job would run
     // in, which the composer's picker opens on.
     meta: { workdir: jobs.resolveWorkdir(store.readConfig()) },
@@ -316,12 +209,83 @@ const server = http.createServer(async (req, res) => {
   // --- live stream ---------------------------------------------------------
   if (req.method === "GET" && p === "/api/events") {
     bus.subscribe(req, res);
-    // Seed the new tab so it never renders an empty shell waiting for a tick.
+    // Seed the new tab so it never renders an empty shell waiting for a push.
     res.write(`event: state\ndata: ${JSON.stringify(snapshot())}\n\n`);
     res.write(
       `event: runs\ndata: ${JSON.stringify({ runs: store.listRunSummaries() })}\n\n`
     );
+    res.write(`event: inbox\ndata: ${JSON.stringify(harness.inbox())}\n\n`);
     return;
+  }
+
+  // --- the harness ---------------------------------------------------------
+  // What bin/sb and the Inbox talk to. Same origin rules as every other route.
+  if (p === "/api/tasks" || p.startsWith("/api/tasks/") || p === "/api/inbox" || p === "/api/catchup" || p.startsWith("/api/decisions/") || p.startsWith("/api/todos") || p === "/api/mode") {
+    try {
+      const body = req.method === "POST" ? JSON.parse((await readBody(req)) || "{}") : {};
+      const ok = (extra) => sendJson(res, 200, { ok: true, ...extra });
+
+      if (req.method === "GET" && p === "/api/tasks") return ok({ tasks: harness.status(), working: harness.workingCount().total, harness: store.readConfig().harness });
+      if (req.method === "POST" && p === "/api/tasks") {
+        return ok(await harness.spawnTask({ repo: body.repo, title: body.title, brief: body.brief, branch: body.branch, opts: body.opts, start: body.start !== false }));
+      }
+      if (req.method === "GET" && p === "/api/inbox") return ok(harness.inbox());
+      if (req.method === "GET" && p === "/api/catchup") return ok(harness.catchup(url.searchParams.get("since") || "8h"));
+      if (req.method === "POST" && p === "/api/mode") return ok({ harness: harness.setMode(String(body.mode || "")) });
+      if (req.method === "POST" && p === "/api/todos") {
+        if (!String(body.text || "").trim()) throw new Error("a to-do needs text");
+        const out = tasks.addTodo({ key: body.key, text: body.text, taskId: body.taskId || "", url: body.url || "" });
+        bus.broadcast("inbox", harness.inbox());
+        return ok(out);
+      }
+      if (req.method === "POST" && p === "/api/todos/done") {
+        const out = tasks.doneTodo(String(body.key || ""));
+        bus.broadcast("inbox", harness.inbox());
+        return ok({ todo: out });
+      }
+      const dm = p.match(/^\/api\/decisions\/([A-Za-z0-9-]+)$/);
+      if (req.method === "POST" && dm) {
+        const out = harness.decide(dm[1], { answer: String(body.answer || "").slice(0, 8000), action: body.action || "answer" });
+        bus.broadcast("inbox", harness.inbox());
+        return ok({ decision: out });
+      }
+      const tm = p.match(/^\/api\/tasks\/([^/]+)(?:\/(\w+))?$/);
+      if (tm) {
+        const id = tasks.safeTaskId(decodeURIComponent(tm[1]));
+        if (!id || !tasks.exists(id)) return sendJson(res, 404, { ok: false, error: "no such task" });
+        const verb = tm[2];
+        if (req.method === "GET" && !verb) {
+          const pth = tasks.paths(id);
+          const read = (f) => {
+            try {
+              return fs.readFileSync(f, "utf8");
+            } catch {
+              return "";
+            }
+          };
+          const report = tasks.readReport(id);
+          const meta = tasks.readMeta(id);
+          return ok({
+            meta,
+            brief: read(pth.brief),
+            report: report ? report.text : "",
+            parsed: report ? { ...report.parsed, sections: undefined } : null,
+            paths: pth,
+            worktree: meta.worktree && meta.status !== "cleaned" ? await tasks.inspectWorktree(meta.worktree) : null,
+            live: jobs.isRunning(id),
+          });
+        }
+        if (req.method === "POST" && verb === "declare") return ok({ meta: harness.declare(id, String(body.state || ""), String(body.text || "").slice(0, 300)) });
+        if (req.method === "POST" && verb === "relaunch") {
+          harness.relaunch(id, String(body.note || "").slice(0, 2000));
+          return ok({});
+        }
+        if (req.method === "POST" && verb === "cleanup") return ok(await harness.cleanup(id, { force: !!body.force }));
+      }
+      return sendJson(res, 404, { ok: false, error: `no harness route for ${req.method} ${p}` });
+    } catch (e) {
+      return sendJson(res, e.refused ? 409 : 400, { ok: false, error: String(e.message || e) });
+    }
   }
 
   // --- everything the header + settings drawer render ----------------------
@@ -440,15 +404,34 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // --- a Slack attachment --------------------------------------------------
-  if (req.method === "GET" && p === "/api/slack/file") {
-    await serveSlackFile(req, res, url.searchParams);
-    return;
-  }
-
   // --- sidebar -------------------------------------------------------------
   if (req.method === "GET" && p === "/api/runs") {
     sendJson(res, 200, { runs: store.listRunSummaries() });
+    return;
+  }
+
+  // --- a chat from a pasted Slack link --------------------------------------
+  // The only way a chat is born from the dashboard. Pasting a link to a thread
+  // that already has a chat opens that chat rather than minting a second one;
+  // `start` runs the pipeline on it straight away unless a job already ran.
+  if (req.method === "POST" && p === "/api/runs") {
+    try {
+      const body = JSON.parse((await readBody(req)) || "{}");
+      const { run, created } = store.createFromLink(body.url);
+      applyOpts(run.runId, body.opts);
+      let started = false;
+      const fresh = store.loadRun(run.runId);
+      let queued = false;
+      if (body.start && !jobs.isRunning(run.runId) && !fresh.sessionId && fresh.action !== "running") {
+        const out = harness.startSlack(run.runId);
+        started = out.state === "started";
+        queued = out.state === "queued";
+      }
+      bus.broadcast("runs", { runs: store.listRunSummaries() });
+      sendJson(res, 200, { ok: true, runId: run.runId, created, started, queued });
+    } catch (e) {
+      sendJson(res, 400, { ok: false, error: String(e.message || e) });
+    }
     return;
   }
 
@@ -475,27 +458,40 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // The poller and the pipeline narrate themselves through here. Best-effort
-    // by design: `emit.sh` swallows failures, so a dashboard that isn't
-    // running never blocks or breaks a headless tick.
+    // The pipeline narrates itself through here. Best-effort by design:
+    // `emit.sh` swallows failures, so a dashboard that isn't running never
+    // blocks or breaks a run started from a terminal.
     if (req.method === "POST" && verb === "event") {
       try {
         const body = JSON.parse((await readBody(req)) || "{}");
         const run = store.loadRun(id) || store.blankRun(id, body);
-        // First contact for a run the poller hasn't logged yet: seed the chat
-        // with the Slack message so the transcript starts where Slack did.
-        if (!run.messages.length && (body.text || body.message)) {
-          store.appendMessage(run, {
+        // The pipeline read the thread through the Slack connector; `message`
+        // is the opening ask. Seed it once, at the top of the transcript, so
+        // the chat starts where Slack did even though this server never saw it.
+        if (body.message && !run.messages.some((m) => m.role === "slack")) {
+          const ask = {
+            id: `slack-${run.runId}`,
+            ts: Math.floor(Number(run.rootTs || run.threadTs) || Date.now() / 1000),
             role: "slack",
             author: body.who || run.who,
-            text: body.message || body.text || "",
+            text: String(body.message),
             permalink: body.permalink || run.permalink || "",
-          });
+          };
+          run.messages.unshift(ask);
+          run.text = ask.text;
         }
         for (const k of ["who", "channel", "channelId", "userId", "permalink", "threadTs", "prUrl", "linearUrl", "action"]) {
           if (body[k]) run[k] = body[k];
         }
         const phase = String(body.phase || "step");
+        // A pipeline run records its worktree for cleanup and status.
+        if (body.worktree || body.branch || body.prUrl) {
+          const patch = {};
+          if (body.worktree && path.isAbsolute(String(body.worktree))) patch.worktree = String(body.worktree);
+          if (body.branch) patch.branch = String(body.branch).slice(0, 120);
+          if (body.prUrl) patch.prUrl = String(body.prUrl);
+          if (Object.keys(patch).length && tasks.safeTaskId(id)) tasks.writeMeta(id, { kind: "slack", repo: env.targetRepo, ...patch });
+        }
 
         // A `memory` event is a *proposal*, never a memory: it lands in
         // data/runs/memories/, which no session loads, and is promoted only by
@@ -571,23 +567,22 @@ const server = http.createServer(async (req, res) => {
         // The composer sends what it is showing along with the message, so the
         // job can never run under options you changed but that hadn't landed.
         applyOpts(id, body.opts);
-        const msg = jobs.startFollowup(id, text, { config: store.readConfig() });
-        sendJson(res, 200, { ok: true, message: msg });
+        const msg = jobs.startFollowup(id, text, { config: store.readConfig(), queue: !!body.queue });
+        sendJson(res, 200, { ok: true, message: msg, queued: !!(msg && msg.queued) });
       } catch (e) {
         sendJson(res, 409, { ok: false, error: String(e.message || e) });
       }
       return;
     }
 
-    // Run the pipeline on a mention by hand. This is what makes watch mode
-    // (and automation-off) a workflow rather than a read-only list.
+    // Run the pipeline on a chat that hasn't had one yet.
     if (req.method === "POST" && verb === "start") {
       try {
         const body = JSON.parse((await readBody(req)) || "{}");
         applyOpts(id, body.opts);
-        const msg = jobs.startPipeline(id, { config: store.readConfig() });
+        const out = harness.startSlack(id);
         bus.broadcast("runs", { runs: store.listRunSummaries() });
-        sendJson(res, 200, { ok: true, message: msg });
+        sendJson(res, 200, { ok: true, ...out });
       } catch (e) {
         sendJson(res, 409, { ok: false, error: String(e.message || e) });
       }
@@ -646,46 +641,19 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === "DELETE" && !verb) {
+      if (id === harness.ORCH) {
+        sendJson(res, 409, { ok: false, error: "the orchestrator chat can't be deleted" });
+        return;
+      }
       if (jobs.isRunning(id)) {
         sendJson(res, 409, { ok: false, error: "stop the running job first" });
         return;
       }
-      // Purges the poller's activity entry too, or the next sync mirrors the
-      // chat straight back in — see store.deleteRun.
       store.deleteRun(id);
       bus.broadcast("runs", { runs: store.listRunSummaries() });
       sendJson(res, 200, { ok: true });
       return;
     }
-  }
-
-  // --- the inbox -----------------------------------------------------------
-  // /scan-mentions posts every mention it sees here, including the ones triage
-  // decided are not our work. The old dashboard could only show what the
-  // pipeline chose to act on, so anything it skipped — or that arrived while
-  // automation was off — was invisible and there was nowhere to disagree.
-  if (req.method === "POST" && p === "/api/mentions") {
-    try {
-      const body = JSON.parse((await readBody(req)) || "{}");
-      const list = Array.isArray(body.mentions) ? body.mentions : [body];
-      let changed = 0;
-      // Echoed back per mention so the caller can see where each one landed.
-      // `worked` tells /scan-mentions not to dispatch a second pipeline at a
-      // conversation one has already run against; the weaker `settled` is what
-      // lets scripts/probe.js skip starting a session for it at all.
-      const results = [];
-      for (const m of list.slice(0, 200)) {
-        const out = store.upsertMention(m);
-        if (!out) continue;
-        if (out.dirty) changed++;
-        results.push({ ts: String(m.ts || m.runId || ""), ...out, runId: out.id });
-      }
-      if (changed) bus.broadcast("runs", { runs: store.listRunSummaries() });
-      sendJson(res, 200, { ok: true, changed, results });
-    } catch (e) {
-      sendJson(res, 400, { ok: false, error: String(e.message || e) });
-    }
-    return;
   }
 
   // --- toggles + settings --------------------------------------------------
@@ -701,50 +669,6 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // --- poll now ------------------------------------------------------------
-  if (req.method === "POST" && p === "/api/tick") {
-    const out = await jobs.tickNow();
-    sendJson(res, 200, out);
-    return;
-  }
-
-  // --- launchd job ---------------------------------------------------------
-  if (req.method === "POST" && p === "/api/cron") {
-    let action = "";
-    try {
-      action = JSON.parse((await readBody(req)) || "{}").action;
-    } catch {}
-    if (!["start", "stop"].includes(action)) {
-      sendJson(res, 400, { ok: false, error: "action must be start | stop" });
-      return;
-    }
-    // The poller-only subcommands, never the both-agents ones: `install.sh
-    // start` boots out the dashboard job, and this script is a *child* of the
-    // dashboard — so it would be killed part-way through and never bootstrap
-    // the dashboard back. Toggling the poller is all this route ever meant.
-    const SUBCOMMAND = { start: "poller-start", stop: "poller-stop" };
-    execFile(
-      path.join(ROOT, "scripts", "install.sh"),
-      [SUBCOMMAND[action]],
-      {
-        timeout: 20000,
-        cwd: ROOT,
-        // Same reason as lib/jobs.js: this server is itself a launchd job, so
-        // it inherits a near-empty PATH and hands it to anything it spawns.
-        // install.sh renders templates with `node`, which isn't on it.
-        env: { ...process.env, PATH: `${env.extraPath}:${process.env.PATH || "/usr/bin:/bin"}` },
-      },
-      (err, stdout, stderr) => {
-        refreshCronInstalled();
-        sendJson(res, err ? 500 : 200, {
-          ok: !err,
-          output: String(stdout || "") + String(stderr || ""),
-        });
-      }
-    );
-    return;
-  }
-
   // --- static --------------------------------------------------------------
   if (req.method === "GET") {
     serveStatic(res, p);
@@ -757,35 +681,19 @@ const server = http.createServer(async (req, res) => {
 
 /* ---------------------------------------------------- watching the files */
 
-// The poller writes its files with an atomic rename, which swaps the inode and
-// makes fs.watch on a path unreliable. Stat-polling four small files costs
-// nothing and never misses a write.
-const watched = ["config", "state", "activity", "cost"];
-const stamps = new Map();
+// config.json can be edited by hand while the dashboard is open; stat-polling
+// one small file costs nothing and keeps every tab honest.
+let configStamp = 0;
 
 function pollFiles() {
-  let stateChanged = false;
-  let activityChanged = false;
-  for (const key of watched) {
-    let mtime = 0;
-    try {
-      mtime = fs.statSync(store.PATHS[key]).mtimeMs;
-    } catch {}
-    if (stamps.get(key) !== mtime) {
-      stamps.set(key, mtime);
-      if (key === "activity") activityChanged = true;
-      else stateChanged = true;
-    }
+  let mtime = 0;
+  try {
+    mtime = fs.statSync(store.PATHS.config).mtimeMs;
+  } catch {}
+  if (mtime !== configStamp) {
+    configStamp = mtime;
+    bus.broadcast("state", snapshot());
   }
-  if (activityChanged) {
-    const touched = store.syncFromActivity();
-    if (touched.length) {
-      bus.broadcast("runs", { runs: store.listRunSummaries() });
-      for (const id of touched) bus.broadcast("run-updated", { runId: id });
-    }
-    stateChanged = true;
-  }
-  if (stateChanged) bus.broadcast("state", snapshot());
 }
 
 /* -------------------------------------------------------------------- go */
@@ -795,9 +703,10 @@ store.ensureRunsDir();
 // did, so nothing on disk is still waiting for an answer. Sweep before the
 // first render or the sidebar comes up claiming chats need you.
 store.clearPendingAsks();
-store.syncFromActivity(); // backfill chats for everything the poller logged before today
-refreshCronInstalled();
-setInterval(refreshCronInstalled, 15000).unref();
+// After the sweep: recovery reads the run files and the task folders, re-arms
+// nothing (the server is the watcher) and turns whatever died with the last
+// process into an outcome you can resume from.
+harness.start();
 setInterval(pollFiles, 1500).unref();
 pollFiles();
 
@@ -819,5 +728,5 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`  runs:      ${store.PATHS.runs}`);
   console.log(`  config:    ${store.PATHS.config}`);
   console.log(`  follow-up: ${jobs.resolveWorkdir(config)}  (model: ${config.followup.model})`);
-  console.log(`\nPoller: ./scripts/install.sh start   (launchd runs claude -p /scan-mentions)`);
+  console.log(`\nPaste a Slack thread link into the dashboard to start a run.`);
 });

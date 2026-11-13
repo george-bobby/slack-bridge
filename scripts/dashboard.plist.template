@@ -3,11 +3,9 @@
   Template. `./scripts/install.sh start` substitutes the __TOKENS__ from .env and
   installs the result into ~/Library/LaunchAgents/. Don't load this file directly.
 
-  The companion to launchd.plist.template: that one runs the poller on an
-  interval, this one keeps the dashboard server alive. Separate labels on
-  purpose — the dashboard checks `launchctl print <poller label>` to draw its
-  own "cron installed" chip, so the poller's label must keep meaning exactly
-  one job. Killing this job never stops mentions being processed.
+  Keeps the dashboard server alive so there is always somewhere to paste a
+  Slack link. It runs nothing on a timer; stopping it only stops the UI and
+  any job you started from it.
 -->
 <plist version="1.0">
 <dict>
@@ -23,7 +21,7 @@
     <string>__PROJ__/index.js</string>
   </array>
 
-  <!-- A server, not a tick: start at load and restart it if it ever exits.
+  <!-- A server: start at load and restart it if it ever exits.
        launchd throttles respawns to one per 10s, so a genuinely broken
        dashboard idles in a slow retry instead of spinning. -->
   <key>RunAtLoad</key>
